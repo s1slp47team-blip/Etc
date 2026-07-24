@@ -49,7 +49,9 @@ import requests
 
 # PORT: 외부 클라우드(PaaS)는 포트를 환경변수로 지정한다. 미지정 시 사내 기본 8767
 PORT = int(os.environ.get("PORT", "8767"))
-HOST = "::"  # 사내망 공유용 (IPv4+IPv6). 내 PC 전용은 "127.0.0.1"
+# HOST: 클라우드 컨테이너에는 IPv6가 없는 경우가 많아, PaaS(PORT 지정) 환경에서는
+# IPv4(0.0.0.0)로 바인딩한다. 사내/로컬은 기존대로 IPv4+IPv6 듀얼스택("::")
+HOST = "0.0.0.0" if os.environ.get("PORT") else "::"
 맛집수 = 30  # 브리핑할 가게 수
 
 
