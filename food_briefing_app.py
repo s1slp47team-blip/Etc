@@ -638,6 +638,7 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>맛집 브리핑</title>
 <style>
   * { box-sizing: border-box; }
@@ -645,7 +646,7 @@ PAGE = r"""<!doctype html>
   header { padding: 12px 20px; background: #1d2a3a;
            background-image: linear-gradient(120deg, #141e30, #2c3e50);
            border-bottom: 2px solid #c9a227;
-           display: flex; gap: 8px; align-items: center;
+           display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
            position: sticky; top: 0; z-index: 10; }
   header h1 { color: #fff; font-size: 1.05em; margin: 0 12px 0 0; white-space: nowrap; }
   header input { flex: 1; max-width: 380px; padding: 9px 12px; font-size: 1em; border: 0; border-radius: 6px; }
@@ -689,6 +690,31 @@ PAGE = r"""<!doctype html>
   table.facts td { padding: 3px 0; vertical-align: top; }
   table.facts td:first-child { color: #888; width: 76px; }
   .skeleton { color: #b5bcc7; }
+
+  /* ── 모바일 레이아웃 (폰에서 자동 적용, PC 화면은 영향 없음) ── */
+  @media (max-width: 640px) {
+    body { font-size: 17px; }
+    header { padding: 10px 12px; gap: 6px; position: static; }
+    header h1 { font-size: 1.15em; margin-right: 4px; }
+    header input { flex: 1 1 100%; max-width: none; font-size: 16px; padding: 12px; }
+    header select { flex: 1 1 30%; font-size: 15px; padding: 11px 6px; }
+    header button { flex: 1 1 45%; font-size: 16px; padding: 12px; }
+    #status { flex: 1 1 100%; margin-left: 0; font-size: .9em; }
+    #results { padding: 10px 10px 40px; }
+    .card { width: 100%; padding: 14px; margin-bottom: 10px; border-radius: 14px; }
+    .top { gap: 12px; }
+    .photo { width: 92px; height: 92px; }
+    .name { font-size: 1.15em; display: inline-block; margin-bottom: 2px; }
+    .meta { display: block; margin-left: 0; margin-top: 2px; font-size: .86em; }
+    .rate { font-size: .95em; }
+    table.facts { font-size: .95em; margin-top: 10px; }
+    table.facts td { padding: 4px 0; }
+    table.facts td:first-child { width: 64px; }
+    .reviews { font-size: .95em; }
+    #mapwrap { padding: 0 8px; }
+    #allmap { height: 340px; }
+    .notice { font-size: .95em; padding: 16px 6px; }
+  }
 </style>
 </head>
 <body>
