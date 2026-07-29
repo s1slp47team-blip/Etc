@@ -223,8 +223,11 @@ def _장소수집(query: str, x: float, y: float, radius: int, 최대: int = 45)
     "육류,고기", "곱창", "막창", "족발", "보쌈", "회", "참치", "해물", "생선",
     "게,대게", "조개", "치킨", "닭발", "오리",
 )
-# 저녁 화이트리스트('육류,고기' 등)에 걸리지만 술 동반성이 약한 세부 업종은 뺀다
-저녁제외_카테고리 = ("삼계탕", "죽", "도시락")
+# 저녁 화이트리스트('육류,고기' 등)에 걸리지만 술 동반성이 약한(식사 전문) 세부 업종은 뺀다
+저녁제외_카테고리 = (
+    "삼계탕", "죽", "도시락", "곰탕", "설렁탕", "갈비탕", "국밥", "백반",
+    "가정식", "기사식당", "국수", "칼국수", "냉면",
+)
 
 # 점심은 '식사'가 목적 — 술집 계열과 술 동반성이 강한 안주·구이·회 전문점을 뺀다.
 # (육류,고기 전체를 빼면 갈비탕·불고기 같은 식사류까지 사라져 세부 업종만 제외)
@@ -263,8 +266,9 @@ def _시간대적합(d: dict, 시간대: str) -> bool:
     "michelin": ("미쉐린 가이드",),
     "blueribbon": ("블루리본",),
     "century": ("백년가게",),
+    "bwchef": ("흑백요리사",),
 }
-인증표시명 = {"michelin": "미쉐린", "blueribbon": "블루리본", "century": "백년가게"}
+인증표시명 = {"michelin": "미쉐린", "blueribbon": "블루리본", "century": "백년가게", "bwchef": "흑백요리사"}
 
 
 def 맛집검색(
@@ -289,9 +293,17 @@ def 맛집검색(
             후보.append(d)
 
     if cert == "any":
+        # 인증 종류별로 따로 모은 뒤 라운드로빈으로 섞는다 —
+        # 한 인증(미쉐린)의 결과가 상위를 독식해 다른 인증이 밀려나지 않게
+        import itertools
+
+        풀들 = []
         for c, 질의들 in 인증검색어.items():
+            시작 = len(후보)
             for 질의 in 질의들:
                 수집(질의, 인증표시명[c])
+            풀들.append(후보[시작:])
+        후보 = [d for 묶음 in itertools.zip_longest(*풀들) for d in 묶음 if d is not None]
     elif cert in 인증검색어:
         for 질의 in 인증검색어[cert]:
             수집(질의, 인증표시명[cert])
@@ -491,12 +503,14 @@ GEMINI_PROMPT = """다음은 "{동네}" 인근 음식점 목록이다. 가게마
 [{{"index": 0,
    "menu": "대표 메뉴 2~3개 (쉼표 구분, 메뉴판·블로그에서 확인된 것만)",
    "price": "1인 기준 가격대 (예: 1인 10,000~15,000원)",
-   "mood": "블로그 반응 한 줄 요약 (15자 이내, 예: 긍정적 · 웨이팅 있음)"}}, ...]
+   "mood": "블로그 반응 한 줄 요약 (15자 이내, 예: 긍정적 · 웨이팅 있음)",
+   "reviews": ["대표 후기 요약 1~2개, 각 45자 이내 (블로그 문장의 취지를 살린 자연스러운 한국어)"]}}, ...]
 
 규칙:
 - price는 메뉴판 가격이 있으면 반드시 그것을 근거로 대표 메뉴(단품/1인 기준) 위주로 계산한다.
   대용량·모둠 메뉴(수백 g, 세트)는 1인 기준 환산에 참고만 한다. 메뉴판이 없으면 블로그 근거로,
   그래도 없으면 "정보 부족"으로 표기한다.
+- reviews는 광고성 문구를 거르고 실제 경험담 위주로 뽑는다. 블로그 후기가 없는 가게는 빈 배열로 둔다.
 - 제공된 자료에 근거가 없는 내용은 지어내지 말고 "정보 부족"으로 표기한다.
 - 모든 가게(index 0~{마지막})를 빠짐없이 포함한다.
 
@@ -546,11 +560,10 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
             resp = gemini_client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
+                # thinking_config는 최신 flash 모델이 거부(400)하므로 사용하지 않는다
                 config=genai_types.GenerateContentConfig(
                     response_mime_type="application/json",
                     temperature=0.3,
-                    # 단순 요약 작업이므로 thinking을 꺼서 응답 속도를 높인다
-                    thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             break
@@ -564,10 +577,14 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
             if "503" in msg or "UNAVAILABLE" in msg:  # 일시적 수요 폭주
                 time.sleep(8 * (시도 + 1))
                 continue
+            # 그 외 오류(모델 정책 변경, 잘못된 인자 등)도 Groq으로 폴백해 요약이 끊기지 않게 한다
+            if GROQ_KEY:
+                print(f"Gemini 오류 → Groq 폴백: {msg[:100]}")
+                break
             raise
     if resp is not None:
         items = json.loads(resp.text)
-    elif GROQ_KEY:  # Gemini 한도 소진 → Groq 무료 폴백
+    elif GROQ_KEY:  # Gemini 실패(한도·오류) → Groq 무료 폴백
         items = _groq요약(prompt)
     else:
         raise RuntimeError("Gemini 요청 한도(429) 재시도 실패")
@@ -624,7 +641,9 @@ def 브리핑생성(동네: str, places: list[dict]) -> tuple[list[dict], bool]:
                 "photo": 자료["photo"],
                 "menu": menu,
                 "price": price or "정보 부족",
-                "mood": s.get("mood") or ("블로그 후기 없음" if not 자료["posts"] else "요약 없음"),
+                # mood가 비면 배지를 표시하지 않는다 ("후기 없음" 같은 무의미한 배지 제거)
+                "mood": s.get("mood") or "",
+                "reviews": (s.get("reviews") or [])[:2],
                 "rating": 자료.get("rating"),
                 "rating_count": 자료.get("rating_count"),
             }
@@ -680,6 +699,7 @@ PAGE = r"""<!doctype html>
   .cert.c-mi { background: #7d0f0f; color: #fff; }
   .cert.c-bl { background: #123c8a; color: #fff; }
   .cert.c-hu { background: #6a4b16; color: #fff; }
+  .cert.c-bw { background: #111; color: #fff; border: 1px solid #555; }
   #mapbtn { background: #2c3e50; color: #fff; }
   #mapbtn:hover { background: #3d5368; }
   #mapwrap { max-width: 1200px; margin: 14px auto 0; padding: 0 20px; display: none; }
@@ -690,6 +710,11 @@ PAGE = r"""<!doctype html>
   table.facts td { padding: 3px 0; vertical-align: top; }
   table.facts td:first-child { color: #888; width: 76px; }
   .skeleton { color: #b5bcc7; }
+  .reviews { border-top: 1px solid #eee; margin-top: 12px; padding-top: 10px;
+             font-size: .9em; color: #555; line-height: 1.6; }
+  .reviews p { margin: 0 0 4px; }
+  .reviews p::before { content: '\201C'; color: #b0bdd0; margin-right: 2px; }
+  .reviews p::after { content: '\201D'; color: #b0bdd0; margin-left: 2px; }
 
   /* ── 모바일 레이아웃 (폰에서 자동 적용, PC 화면은 영향 없음) ── */
   @media (max-width: 640px) {
@@ -751,6 +776,7 @@ PAGE = r"""<!doctype html>
     <option value="michelin">미쉐린 가이드</option>
     <option value="blueribbon">블루리본</option>
     <option value="century">백년가게</option>
+    <option value="bwchef">흑백요리사</option>
   </select>
   <select id="rate" title="카카오맵 별점 필터">
     <option value="0" selected>평점 무관</option>
@@ -772,7 +798,7 @@ PAGE = r"""<!doctype html>
 · 점심 — 식사 위주 (술집·안주 전문점 제외)
 · 저녁 — 술을 곁들이기 좋은 집 (고기·회·주점 등)
 
-인증 필터(미쉐린 가이드·블루리본·백년가게)는 카카오맵 검색 연관 기준의
+인증 필터(미쉐린 가이드·블루리본·백년가게·흑백요리사)는 카카오맵 검색 연관 기준의
 참고용 분류입니다. 공식 명부가 공개되어 있지 않아 누락·오포함이 있을 수
 있으며, 블루리본은 데이터가 적어 결과가 없을 수 있습니다.
 
@@ -851,7 +877,8 @@ function renderBase(data) {
   }
   results.innerHTML = data.places.map(function (p, i) {
     var certs = (p.badges || []).map(function (b) {
-      var cls = b === '미쉐린' ? 'c-mi' : (b === '블루리본' ? 'c-bl' : 'c-hu');
+      var cls = b === '미쉐린' ? 'c-mi' : (b === '블루리본' ? 'c-bl'
+              : (b === '흑백요리사' ? 'c-bw' : 'c-hu'));
       return '<span class="cert ' + cls + '">' + esc(b) + '</span>';
     }).join('');
     var rating = p.rating ? '★' + p.rating + (p.rating_count ? ' (' + p.rating_count + ')' : '') : '';
@@ -876,6 +903,7 @@ function renderBase(data) {
     +     '</table>'
     +   '</div>'
     + '</div>'
+    + '<div class="reviews" id="reviews-' + i + '" style="display:none"></div>'
     + '</div>';
   }).join('');
 }
@@ -903,7 +931,15 @@ function fillDetail(items) {
       rt.textContent = '★' + d.rating + (d.rating_count ? ' (' + d.rating_count + ')' : '');
     }
     var mood = document.getElementById('mood-' + i);
-    if (mood) { mood.textContent = d.mood; mood.className = 'badge'; }
+    if (mood) {
+      if (d.mood) { mood.textContent = d.mood; mood.className = 'badge'; }
+      else { mood.style.display = 'none'; }  // 후기 없음 등 무의미한 배지는 표시하지 않음
+    }
+    var rv = document.getElementById('reviews-' + i);
+    if (rv && d.reviews && d.reviews.length) {
+      rv.innerHTML = d.reviews.map(function (r) { return '<p>' + esc(r) + '</p>'; }).join('');
+      rv.style.display = '';
+    }
   });
 }
 
@@ -1026,7 +1062,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 meal = "all"
             cnt = min(max(int(qs.get("cnt", ["30"])[0]), 10), 100)
             cert = qs.get("cert", ["none"])[0]
-            if cert not in ("none", "any", "michelin", "blueribbon", "century"):
+            if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
                 cert = "none"
             rate = qs.get("rate", ["0"])[0] == "4"
             try:
@@ -1070,7 +1106,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 meal = "all"
             cnt = min(max(int(req.get("cnt", 30)), 10), 100)
             cert = req.get("cert", "none")
-            if cert not in ("none", "any", "michelin", "blueribbon", "century"):
+            if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
                 cert = "none"
             rate = str(req.get("rate", "0")) == "4"
             key = (q, radius, meal, cnt, cert, rate)
