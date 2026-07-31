@@ -381,11 +381,13 @@ def 내맛집목록() -> list[dict]:
 
 
 def _저장배지(폴더명: str) -> str:
-    """폴더 이름에서 '가본곳/가볼곳'을 읽어 배지 문구를 만든다."""
+    """폴더 이름을 읽어 배지 문구를 만든다 (가본곳/가볼곳/카페)."""
     if "가본" in 폴더명:
         return "♥ 가본곳"
     if "가볼" in 폴더명:
         return "♡ 가볼곳"
+    if "카페" in 폴더명 or "디저트" in 폴더명:
+        return "☕ 내저장"
     return "♥ 내저장"
 
 
@@ -555,12 +557,26 @@ def 맛집검색(
                 or (n and n.startswith(_이름정규화(s["name"])))
                 for n in 검색됨
             )
-        ][:20]  # 과도한 호출 방지
+        ]
+        # 시간대에 맞는 리스트를 앞에 둔다 — 카페 모드에서 맛집 저장분이 앞을
+        # 다 차지해 저장한 카페가 상한에 잘려나가지 않도록
+        카페폴더 = lambda s: ("카페" in s["folder"] or "디저트" in s["folder"])
+        if 시간대 == "cafe":
+            누락 = [s for s in 누락 if 카페폴더(s)] + [s for s in 누락 if not 카페폴더(s)]
+        else:
+            누락 = [s for s in 누락 if not 카페폴더(s)] + [s for s in 누락 if 카페폴더(s)]
+        누락 = 누락[:30]  # 과도한 호출 방지
         if 누락:
+            def 개별검색(s):
+                # 카페 모드는 카페 그룹(CE7)에서도 찾아야 저장한 카페가 잡힌다
+                for 코드 in 그룹코드들:
+                    docs = _장소수집(s["name"], s["lng"], s["lat"], 300, 최대=3, 그룹코드=코드)
+                    if docs:
+                        return docs
+                return []
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
-                결과들 = list(pool.map(
-                    lambda s: _장소수집(s["name"], s["lng"], s["lat"], 300, 최대=3), 누락
-                ))
+                결과들 = list(pool.map(개별검색, 누락))
             for s, docs in zip(누락, 결과들):
                 for d in docs:
                     if d["id"] in seen or not _시간대적합(d, 시간대):
@@ -974,6 +990,7 @@ PAGE = r"""<!doctype html>
   .cert.c-bw { background: #111; color: #fff; border: 1px solid #555; }
   .cert.c-my { background: #d63b5b; color: #fff; }   /* 가본곳 */
   .cert.c-my2 { background: #fdeaee; color: #b02a45; border: 1px solid #f3c2ce; }  /* 가볼곳 */
+  .cert.c-cf { background: #6b4a2f; color: #fff; }   /* 저장한 카페 */
   #mapbtn { background: #2c3e50; color: #fff; }
   #mapbtn:hover { background: #3d5368; }
   #mapwrap { max-width: 1200px; margin: 14px auto 0; padding: 0 20px; display: none; }
@@ -1163,7 +1180,8 @@ function renderBase(data) {
   results.innerHTML = data.places.map(function (p, i) {
     var certs = (p.badges || []).map(function (b) {
       var cls;
-      if (b.indexOf('가본곳') >= 0) cls = 'c-my';
+      if (b.indexOf('☕') >= 0) cls = 'c-cf';
+      else if (b.indexOf('가본곳') >= 0) cls = 'c-my';
       else if (b.indexOf('가볼곳') >= 0 || b.indexOf('내저장') >= 0) cls = 'c-my2';
       else if (b === '미쉐린') cls = 'c-mi';
       else if (b === '블루리본') cls = 'c-bl';
