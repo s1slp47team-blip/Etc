@@ -426,12 +426,58 @@ def 내저장_매칭(place: dict, 저장목록: list[dict]) -> str:
 # 이용한다. 공식 인증 명부 API가 없어(미쉐린·블루리본 모두 비공개) 참고용 분류이며,
 # 블루리본은 카카오 데이터가 빈약해 결과가 적을 수 있다.
 인증검색어 = {
-    "michelin": ("미쉐린 가이드",),
-    "blueribbon": ("블루리본",),
-    "century": ("백년가게",),
-    "bwchef": ("흑백요리사",),
+    "michelin": ("미쉐린 가이드", "미슐랭", "미쉐린 맛집", "미쉐린 빕구르망"),
+    "blueribbon": ("블루리본", "블루리본 맛집", "블루리본서베이"),
+    "century": ("백년가게", "백년가게 맛집", "노포"),
+    "bwchef": ("흑백요리사", "흑백요리사 맛집", "흑백요리사 셰프"),
 }
 인증표시명 = {"michelin": "미쉐린", "blueribbon": "블루리본", "century": "백년가게", "bwchef": "흑백요리사"}
+
+_인증맵캐시: dict[tuple, dict[str, list[str]]] = {}
+_인증맵잠금 = threading.Lock()
+
+
+def 인증맵(x: float, y: float, radius: int) -> dict[str, list[str]]:
+    """해당 반경의 인증 맛집을 미리 조회해 {정규화 상호: [배지들]}로 만든다.
+    인증 필터를 안 걸고 검색해도 인증 배지가 보이도록 하기 위한 것.
+    카카오 장소 ID는 같은 가게라도 검색 경로에 따라 다를 수 있어 상호로 대조한다.
+    좌표·반경 단위로 캐시해 반복 검색 시 추가 호출이 없다."""
+    키 = (round(x, 3), round(y, 3), radius)  # 약 100m 격자로 캐시 공유
+    with _인증맵잠금:
+        if 키 in _인증맵캐시:
+            return _인증맵캐시[키]
+    결과: dict[str, list[str]] = {}
+
+    def 조사(항목):
+        c, 질의들 = 항목
+        찾음 = []
+        for 질의 in 질의들:
+            for d in _장소수집(질의, x, y, radius):
+                찾음.append(d["place_name"])
+        return 인증표시명[c], 찾음
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+        for 배지, 이름들 in pool.map(조사, 인증검색어.items()):
+            for 이름 in 이름들:
+                키이름 = _이름정규화(이름)
+                if 키이름 and 배지 not in 결과.setdefault(키이름, []):
+                    결과[키이름].append(배지)
+    with _인증맵잠금:
+        _인증맵캐시[키] = 결과
+    return 결과
+
+
+def _인증배지찾기(place_name: str, 인증정보: dict[str, list[str]]) -> list[str]:
+    """상호로 인증 배지를 찾는다. '가게명 지점명' 형태의 표기 차이도 흡수."""
+    이름 = _이름정규화(place_name)
+    if not 이름:
+        return []
+    if 이름 in 인증정보:
+        return 인증정보[이름]
+    for 등록명, 배지들 in 인증정보.items():
+        if len(등록명) >= 3 and (이름.startswith(등록명) or 등록명.startswith(이름)):
+            return 배지들
+    return []
 
 
 def 맛집검색(
@@ -478,6 +524,19 @@ def 맛집검색(
             if len(후보) >= 목표:
                 break
             수집(검색어)
+
+    # ── 인증 배지 보강 ────────────────────────────────────────
+    # 인증 필터를 안 걸고 검색해도 인증 맛집이면 배지가 보이도록 한다
+    # (카페 모드는 인증 검색어가 음식점 위주라 생략)
+    if 시간대 != "cafe":
+        try:
+            인증정보 = 인증맵(x, y, radius)
+            for d in 후보:
+                for 배지 in _인증배지찾기(d["place_name"], 인증정보):
+                    if 배지 not in d["badges"]:
+                        d["badges"].append(배지)
+        except Exception as e:
+            print(f"인증 배지 조회 실패(무시): {e}")
 
     # ── 내 저장 맛집(네이버지도) 반영 ─────────────────────────
     저장목록 = 내맛집목록() if 내저장 in ("prefer", "only") else []
@@ -1279,6 +1338,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         if parsed.path == "/":
             self._send(PAGE.encode("utf-8"), "text/html; charset=utf-8")
+        elif parsed.path == "/diag":  # 원격 진단 (내 저장 맛집 로드 상태)
+            정보 = {"links": len(_저장링크들()), "cached": len(_내맛집캐시["목록"])}
+            try:
+                fid = _공유ID추출(_저장링크들()[0]) if _저장링크들() else ""
+                정보["share_id_ok"] = bool(fid)
+                if fid:
+                    r = requests.get(
+                        f"{_저장리스트_API}/{fid}/bookmarks",
+                        params={"start": 0, "limit": 3},
+                        headers=_저장리스트_헤더,
+                        timeout=15,
+                    )
+                    정보["api_status"] = r.status_code
+                    정보["api_body"] = r.text[:150]
+            except Exception as e:
+                정보["error"] = f"{type(e).__name__}: {str(e)[:150]}"
+            self._send_json(정보)
         elif parsed.path == SDK_PATH:  # 카카오맵 JS SDK 프록시 (사내망 차단 우회)
             try:
                 self._send(카카오SDK(), "text/javascript; charset=utf-8")
