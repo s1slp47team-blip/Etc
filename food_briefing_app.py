@@ -193,15 +193,17 @@ def 동네좌표(query: str):
     return None
 
 
-def _장소수집(query: str, x: float, y: float, radius: int, 최대: int = 45) -> list[dict]:
-    """키워드 검색 결과를 카테고리 전체 경로와 함께 모은다 (정확도순)."""
+def _장소수집(query: str, x: float, y: float, radius: int, 최대: int = 45,
+              그룹코드: str = "FD6") -> list[dict]:
+    """키워드 검색 결과를 카테고리 전체 경로와 함께 모은다 (정확도순).
+    그룹코드: FD6=음식점, CE7=카페 (카카오는 카페를 별도 그룹으로 분류)."""
     docs, page = [], 1
     while len(docs) < 최대 and page <= 3:
         data = _kakao_get(
             "search/keyword.json",
             {
                 "query": query,
-                "category_group_code": "FD6",
+                "category_group_code": 그룹코드,
                 "x": x,
                 "y": y,
                 "radius": radius,
@@ -242,11 +244,35 @@ def _카테고리매칭(doc: dict, 키워드들: tuple) -> bool:
     return any(k in cat for k in 키워드들)
 
 
+# 카페·디저트: 카카오 카페 그룹(CE7) + 음식점 그룹의 제과·베이커리·아이스크림까지 포함.
+# 단, 술집으로 운영되는 곳(카페 이름의 포차 등)과 룸카페·보드게임방 등 비디저트 테마는 제외.
+카페포함_카테고리 = ("카페", "제과", "베이커리", "아이스크림", "빙수", "디저트", "브런치", "도넛", "케이크")
+카페제외_카테고리 = (
+    "술집", "호프", "요리주점", "포장마차",
+    # 음료·디저트가 목적이 아닌 공간 대여형·체험형 카페
+    "룸카페", "만화카페", "보드게임", "PC방", "스터디", "방탈출", "애견", "애완",
+    "고양이", "동물", "키즈", "포토", "사진", "공방", "네일", "타로", "마사지",
+)
+
+
+# 카카오가 '테마카페'로만 분류하는 방탈출·체험형 업소는 카테고리로 못 걸러 상호로 판단한다
+카페제외_상호 = ("방탈출", "이스케이프", "escape", "비트포비아", "룸카페", "만화", "보드게임",
+              "애견", "애완", "고양이", "라쿤", "키즈", "스터디", "사주", "타로")
+
+
 def _시간대적합(d: dict, 시간대: str) -> bool:
     if 시간대 == "lunch":
         return not _카테고리매칭(d, 점심제외_카테고리)
     if 시간대 == "dinner":
         return _카테고리매칭(d, 술어울림_카테고리) and not _카테고리매칭(d, 저녁제외_카테고리)
+    if 시간대 == "cafe":
+        if not _카테고리매칭(d, 카페포함_카테고리) or _카테고리매칭(d, 카페제외_카테고리):
+            return False
+        이름 = (d.get("place_name") or "").lower()
+        if any(k in 이름 for k in 카페제외_상호):
+            return False
+        # 세부 분류 없는 순수 '테마카페'는 디저트 목적이 불확실해 제외
+        return (d.get("category_name") or "").strip() != "음식점 > 카페 > 테마카페"
     return True
 
 
@@ -256,7 +282,144 @@ def _시간대적합(d: dict, 시간대: str) -> bool:
     "all": ("맛집", "식당", "음식점", "밥집", "한식", "일식", "중식", "양식", "분식", "고기", "국밥", "파스타"),
     "lunch": ("맛집", "점심", "식당", "음식점", "밥집", "한식", "일식", "중식", "양식", "분식", "국밥", "돈까스", "국수"),
     "dinner": ("맛집", "술집", "고깃집", "이자카야", "호프", "회식", "포차", "와인바", "횟집", "치킨", "곱창", "족발"),
+    "cafe": ("카페", "디저트", "커피", "베이커리", "빵집", "브런치", "케이크", "빙수", "도넛", "아이스크림"),
 }
+# 카페 모드는 카카오 카페 그룹(CE7)을 먼저 훑고, 부족하면 음식점 그룹(제과·베이커리)에서 보충
+검색그룹코드 = {"cafe": ("CE7", "FD6")}
+
+
+# ── 1.7 내 저장 맛집 (네이버지도 공유 리스트) ───────────────────
+# 네이버는 개인 저장 장소 공식 API를 제공하지 않는다. 대신 지도 앱의 '공유' 기능으로
+# 만든 공개 리스트를, 공유 페이지가 쓰는 내부 API(v3/shares)에서 읽어온다.
+# 링크는 내맛집링크.txt에 한 줄씩 넣는다 (없으면 기능 자체가 비활성).
+_저장리스트_API = "https://pages.map.naver.com/save-pages/api/maps-bookmark/v3/shares"
+_저장리스트_헤더 = {
+    "User-Agent": _브라우저_UA if "_브라우저_UA" in dir() else "Mozilla/5.0",
+    "Accept": "application/json",
+    "Referer": "https://pages.map.naver.com/",
+}
+_내맛집캐시: dict = {"목록": [], "시각": 0.0}
+_내맛집잠금 = threading.Lock()
+내맛집갱신주기 = 3600  # 1초 단위 — 네이버지도에서 새로 저장한 가게가 1시간 내 반영됨
+
+
+def _공유ID추출(링크: str) -> str:
+    """naver.me 단축링크 또는 map.naver.com 공유 URL에서 32자 공유 ID를 얻는다."""
+    링크 = 링크.strip()
+    if not 링크 or 링크.startswith("#"):
+        return ""
+    m = re.search(r"([0-9a-f]{32})", 링크)
+    if m:
+        return m.group(1)
+    try:  # naver.me 단축링크는 리다이렉트를 따라가 최종 URL에서 뽑는다
+        resp = requests.get(링크, headers=_저장리스트_헤더, timeout=10, allow_redirects=True)
+        m = re.search(r"([0-9a-f]{32})", resp.url) or re.search(r"([0-9a-f]{32})", resp.text[:4000])
+        return m.group(1) if m else ""
+    except requests.RequestException:
+        return ""
+
+
+def _저장링크들() -> list[str]:
+    """공유 링크 출처: ① 환경변수 MY_PLACE_LINKS(쉼표/공백 구분 — 외부 클라우드용)
+    ② 같은 폴더의 내맛집링크.txt (사내·로컬용). 둘 다 없으면 기능 비활성."""
+    링크들 = []
+    환경값 = _env("MY_PLACE_LINKS")
+    if 환경값:
+        링크들 = [s for s in re.split(r"[,\s]+", 환경값) if s.strip()]
+    if not 링크들:
+        경로 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "내맛집링크.txt")
+        try:
+            with open(경로, encoding="utf-8") as f:
+                링크들 = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+        except OSError:
+            return []
+    return 링크들
+
+
+def 내맛집목록() -> list[dict]:
+    """저장 리스트 전체를 [{name, lat, lng, folder}] 로 반환 (1시간 캐시)."""
+    with _내맛집잠금:
+        if _내맛집캐시["목록"] and time.time() - _내맛집캐시["시각"] < 내맛집갱신주기:
+            return _내맛집캐시["목록"]
+    목록 = []
+    for 링크 in _저장링크들():
+        fid = _공유ID추출(링크)
+        if not fid:
+            continue
+        try:
+            메타 = requests.get(f"{_저장리스트_API}/{fid}", headers=_저장리스트_헤더, timeout=15)
+            폴더명 = ((메타.json() or {}).get("folder") or {}).get("name") or "저장"
+            시작 = 0
+            while True:  # 공유 API는 한 번에 최대 수백 건 — 넉넉히 페이징
+                resp = requests.get(
+                    f"{_저장리스트_API}/{fid}/bookmarks",
+                    params={"start": 시작, "limit": 300},
+                    headers=_저장리스트_헤더,
+                    timeout=20,
+                )
+                항목들 = (resp.json() or {}).get("bookmarkList") or []
+                for b in 항목들:
+                    if b.get("name") and b.get("px") and b.get("py"):
+                        목록.append(
+                            {
+                                "name": b["name"],
+                                "lat": float(b["py"]),
+                                "lng": float(b["px"]),
+                                "folder": 폴더명,
+                            }
+                        )
+                if len(항목들) < 300:
+                    break
+                시작 += 300
+        except (requests.RequestException, ValueError) as e:
+            print(f"내 저장 맛집 로드 실패({링크[:40]}): {e}")
+    with _내맛집잠금:
+        _내맛집캐시["목록"], _내맛집캐시["시각"] = 목록, time.time()
+    if 목록:
+        print(f"내 저장 맛집 {len(목록)}곳 로드")
+    return 목록
+
+
+def _저장배지(폴더명: str) -> str:
+    """폴더 이름에서 '가본곳/가볼곳'을 읽어 배지 문구를 만든다."""
+    if "가본" in 폴더명:
+        return "♥ 가본곳"
+    if "가볼" in 폴더명:
+        return "♡ 가볼곳"
+    return "♥ 내저장"
+
+
+def _대략거리m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    """짧은 거리용 근사 계산 (위도 1도≈111km, 경도는 cos 보정)."""
+    import math
+
+    dy = (lat1 - lat2) * 111_000
+    dx = (lng1 - lng2) * 111_000 * math.cos(math.radians((lat1 + lat2) / 2))
+    return math.hypot(dx, dy)
+
+
+def _이름정규화(s: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z가-힣]", "", s or "").lower()
+
+
+def 내저장_매칭(place: dict, 저장목록: list[dict]) -> str:
+    """검색 결과 1곳이 내 저장 맛집인지 판정 → 배지 문구 (아니면 빈 문자열).
+    좌표 120m 이내 + 이름 유사(포함 관계)면 같은 가게로 본다.
+    두 리스트에 모두 있으면 '가본곳'만 표시한다 (이미 가봤으므로)."""
+    이름 = _이름정규화(place["name"])
+    배지들 = set()
+    for s in 저장목록:
+        if _대략거리m(place["lat"], place["lng"], s["lat"], s["lng"]) > 120:
+            continue
+        저장이름 = _이름정규화(s["name"])
+        if not 저장이름 or not 이름:
+            continue
+        if 이름 == 저장이름 or 이름.startswith(저장이름) or 저장이름.startswith(이름):
+            배지들.add(_저장배지(s["folder"]))
+    if not 배지들:
+        return ""
+    가본 = next((b for b in 배지들 if "가본곳" in b), "")
+    return 가본 or sorted(배지들)[0]
 
 
 # 인증 필터: 카카오 검색의 키워드 연관도(리뷰·블로그에 해당 인증으로 언급되는 정도)를
@@ -273,24 +436,26 @@ def _시간대적합(d: dict, 시간대: str) -> bool:
 
 def 맛집검색(
     x: float, y: float, radius: int, 시간대: str = "all", 개수: int = 맛집수,
-    cert: str = "none", 평점4: bool = False,
+    cert: str = "none", 평점4: bool = False, 내저장: str = "prefer",
 ) -> list[dict]:
     """좌표 반경 내 맛집 검색.
     시간대: all/lunch(식사)/dinner(술 동반) · cert: none/any/michelin/blueribbon/century
     평점4: 카카오맵 별점 4.0 이상만."""
     후보, seen = [], {}
+    그룹코드들 = 검색그룹코드.get(시간대, ("FD6",))
 
     def 수집(질의: str, 배지: str = ""):
-        for d in _장소수집(질의, x, y, radius):
-            if not _시간대적합(d, 시간대):
-                continue
-            if d["id"] in seen:
-                if 배지 and 배지 not in seen[d["id"]]["badges"]:
-                    seen[d["id"]]["badges"].append(배지)
-                continue
-            d["badges"] = [배지] if 배지 else []
-            seen[d["id"]] = d
-            후보.append(d)
+        for 코드 in 그룹코드들:
+            for d in _장소수집(질의, x, y, radius, 그룹코드=코드):
+                if not _시간대적합(d, 시간대):
+                    continue
+                if d["id"] in seen:
+                    if 배지 and 배지 not in seen[d["id"]]["badges"]:
+                        seen[d["id"]]["badges"].append(배지)
+                    continue
+                d["badges"] = [배지] if 배지 else []
+                seen[d["id"]] = d
+                후보.append(d)
 
     if cert == "any":
         # 인증 종류별로 따로 모은 뒤 라운드로빈으로 섞는다 —
@@ -313,6 +478,54 @@ def 맛집검색(
             if len(후보) >= 목표:
                 break
             수집(검색어)
+
+    # ── 내 저장 맛집(네이버지도) 반영 ─────────────────────────
+    저장목록 = 내맛집목록() if 내저장 in ("prefer", "only") else []
+    if 저장목록:
+        # 반경 안의 저장 맛집이 카카오 검색에 안 잡혔으면 이름으로 직접 찾아 보강한다
+        검색됨 = {
+            _이름정규화(d["place_name"])
+            for d in 후보
+        }
+        누락 = [
+            s for s in 저장목록
+            if _대략거리m(y, x, s["lat"], s["lng"]) <= radius
+            and not any(
+                _이름정규화(s["name"]) == n
+                or (n and _이름정규화(s["name"]).startswith(n))
+                or (n and n.startswith(_이름정규화(s["name"])))
+                for n in 검색됨
+            )
+        ][:20]  # 과도한 호출 방지
+        if 누락:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+                결과들 = list(pool.map(
+                    lambda s: _장소수집(s["name"], s["lng"], s["lat"], 300, 최대=3), 누락
+                ))
+            for s, docs in zip(누락, 결과들):
+                for d in docs:
+                    if d["id"] in seen or not _시간대적합(d, 시간대):
+                        continue
+                    if _대략거리m(float(d["y"]), float(d["x"]), s["lat"], s["lng"]) > 150:
+                        continue
+                    if cert not in ("none",) and not d.get("badges"):
+                        pass  # 인증 필터 중이면 배지 없이 들어오되 저장 배지로 표시됨
+                    d["badges"] = []
+                    d["distance"] = str(int(_대략거리m(y, x, float(d["y"]), float(d["x"]))))
+                    seen[d["id"]] = d
+                    후보.append(d)
+                    break
+        for d in 후보:
+            배지 = 내저장_매칭(
+                {"name": d["place_name"], "lat": float(d["y"]), "lng": float(d["x"])}, 저장목록
+            )
+            d["_저장배지"] = 배지
+            if 배지 and 배지 not in d["badges"]:
+                d["badges"].insert(0, 배지)
+        if 내저장 == "only":
+            후보 = [d for d in 후보 if d.get("_저장배지")]
+        else:  # prefer — 저장 맛집을 앞으로 (그 안에서는 기존 정확도순 유지)
+            후보 = [d for d in 후보 if d.get("_저장배지")] + [d for d in 후보 if not d.get("_저장배지")]
 
     # 카카오맵 상세(평점·영업시간·예약)를 붙인다 — 결과 카드와 평점 필터에 사용.
     # 평점 필터가 있으면 후보 전체를, 아니면 상위 개수만 조회 (조회 결과는 캐시됨)
@@ -700,6 +913,8 @@ PAGE = r"""<!doctype html>
   .cert.c-bl { background: #123c8a; color: #fff; }
   .cert.c-hu { background: #6a4b16; color: #fff; }
   .cert.c-bw { background: #111; color: #fff; border: 1px solid #555; }
+  .cert.c-my { background: #d63b5b; color: #fff; }   /* 가본곳 */
+  .cert.c-my2 { background: #fdeaee; color: #b02a45; border: 1px solid #f3c2ce; }  /* 가볼곳 */
   #mapbtn { background: #2c3e50; color: #fff; }
   #mapbtn:hover { background: #3d5368; }
   #mapwrap { max-width: 1200px; margin: 14px auto 0; padding: 0 20px; display: none; }
@@ -750,6 +965,7 @@ PAGE = r"""<!doctype html>
     <option value="all" selected>전체</option>
     <option value="lunch">점심 (식사 위주)</option>
     <option value="dinner">저녁 (술 한잔)</option>
+    <option value="cafe">카페 · 디저트</option>
   </select>
   <select id="radius">
     <option value="500">500m</option>
@@ -782,6 +998,11 @@ PAGE = r"""<!doctype html>
     <option value="0" selected>평점 무관</option>
     <option value="4">★4.0 이상</option>
   </select>
+  <select id="mine" title="네이버지도에 저장해둔 내 맛집">
+    <option value="prefer" selected>내 저장 우선</option>
+    <option value="only">내 저장만</option>
+    <option value="off">내 저장 무시</option>
+  </select>
   <button onclick="doSearch()">검색</button>
   <button id="mapbtn" onclick="toggleMap()" style="display:none">지도로 보기</button>
   <span id="status"></span>
@@ -797,6 +1018,10 @@ PAGE = r"""<!doctype html>
 시간대를 고르면 기준이 달라집니다:
 · 점심 — 식사 위주 (술집·안주 전문점 제외)
 · 저녁 — 술을 곁들이기 좋은 집 (고기·회·주점 등)
+· 카페·디저트 — 카페·베이커리·디저트 전문점 (룸카페 등 제외)
+
+내 저장 맛집(네이버지도에 저장한 리스트)은 기본으로 맨 위에 ♥가본곳·♡가볼곳
+배지와 함께 표시됩니다. "내 저장만" 선택 시 저장한 곳만 볼 수 있습니다.
 
 인증 필터(미쉐린 가이드·블루리본·백년가게·흑백요리사)는 카카오맵 검색 연관 기준의
 참고용 분류입니다. 공식 명부가 공개되어 있지 않아 누락·오포함이 있을 수
@@ -832,6 +1057,7 @@ function doSearch() {
   var cnt = document.getElementById('cnt').value;
   var cert = document.getElementById('cert').value;
   var rate = document.getElementById('rate').value;
+  var mine = document.getElementById('mine').value;
   if (!q) return;
   searching = true;
   var status = document.getElementById('status');
@@ -839,7 +1065,7 @@ function doSearch() {
   status.textContent = (cert !== 'none' || rate === '4')
     ? '음식점 검색 + 인증·평점 확인 중... (10~30초)' : '주변 음식점 검색 중...';
   var qs = '/search?q=' + encodeURIComponent(q) + '&radius=' + radius + '&meal=' + meal
-         + '&cnt=' + cnt + '&cert=' + cert + '&rate=' + rate;
+         + '&cnt=' + cnt + '&cert=' + cert + '&rate=' + rate + '&mine=' + mine;
   ajax('GET', qs, null, function (err, data) {
     if (err) { status.textContent = '오류: ' + err.message; searching = false; return; }
     if (data.error) {
@@ -859,7 +1085,7 @@ function doSearch() {
       return;
     }
     status.textContent = '블로그 후기 분석 중... (' + (data.places.length <= 30 ? '30~40초' : '1~2분') + ')';
-    ajax('POST', '/enrich', JSON.stringify({query: q, radius: radius, meal: meal, cnt: cnt, cert: cert, rate: rate}), function (err2, detail) {
+    ajax('POST', '/enrich', JSON.stringify({query: q, radius: radius, meal: meal, cnt: cnt, cert: cert, rate: rate, mine: mine}), function (err2, detail) {
       searching = false;
       if (err2) { status.textContent = '오류: ' + err2.message; return; }
       if (detail.error) { status.textContent = detail.error; return; }
@@ -877,8 +1103,13 @@ function renderBase(data) {
   }
   results.innerHTML = data.places.map(function (p, i) {
     var certs = (p.badges || []).map(function (b) {
-      var cls = b === '미쉐린' ? 'c-mi' : (b === '블루리본' ? 'c-bl'
-              : (b === '흑백요리사' ? 'c-bw' : 'c-hu'));
+      var cls;
+      if (b.indexOf('가본곳') >= 0) cls = 'c-my';
+      else if (b.indexOf('가볼곳') >= 0 || b.indexOf('내저장') >= 0) cls = 'c-my2';
+      else if (b === '미쉐린') cls = 'c-mi';
+      else if (b === '블루리본') cls = 'c-bl';
+      else if (b === '흑백요리사') cls = 'c-bw';
+      else cls = 'c-hu';
       return '<span class="cert ' + cls + '">' + esc(b) + '</span>';
     }).join('');
     var rating = p.rating ? '★' + p.rating + (p.rating_count ? ' (' + p.rating_count + ')' : '') : '';
@@ -1058,15 +1289,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             q = qs.get("q", [""])[0].strip()
             radius = min(max(int(qs.get("radius", ["2000"])[0]), 100), 3000)
             meal = qs.get("meal", ["all"])[0]
-            if meal not in ("all", "lunch", "dinner"):
+            if meal not in ("all", "lunch", "dinner", "cafe"):
                 meal = "all"
             cnt = min(max(int(qs.get("cnt", ["30"])[0]), 10), 100)
             cert = qs.get("cert", ["none"])[0]
             if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
                 cert = "none"
             rate = qs.get("rate", ["0"])[0] == "4"
+            mine = qs.get("mine", ["prefer"])[0]
+            if mine not in ("prefer", "only", "off"):
+                mine = "prefer"
             try:
-                self._send_json(self._search(q, radius, meal, cnt, cert, rate))
+                self._send_json(self._search(q, radius, meal, cnt, cert, rate, mine))
             except Exception as e:
                 self._send_json({"error": str(e)})
         else:
@@ -1102,14 +1336,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             q = req["query"].strip()
             radius = min(max(int(req.get("radius", 2000)), 100), 3000)
             meal = req.get("meal", "all")
-            if meal not in ("all", "lunch", "dinner"):
+            if meal not in ("all", "lunch", "dinner", "cafe"):
                 meal = "all"
             cnt = min(max(int(req.get("cnt", 30)), 10), 100)
             cert = req.get("cert", "none")
             if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
                 cert = "none"
             rate = str(req.get("rate", "0")) == "4"
-            key = (q, radius, meal, cnt, cert, rate)
+            mine = req.get("mine", "prefer")
+            if mine not in ("prefer", "only", "off"):
+                mine = "prefer"
+            key = (q, radius, meal, cnt, cert, rate, mine)
             with 캐시잠금:
                 cached = 상세캐시.get(key)
                 base = 검색캐시.get(key)
@@ -1129,11 +1366,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def _search(
         self, q: str, radius: int, meal: str = "all", cnt: int = 30,
-        cert: str = "none", rate: bool = False,
+        cert: str = "none", rate: bool = False, mine: str = "prefer",
     ) -> dict:
         if not q:
             return {"error": "동네 이름을 입력하세요."}
-        key = (q, radius, meal, cnt, cert, rate)
+        key = (q, radius, meal, cnt, cert, rate, mine)
         with 캐시잠금:
             cached = 검색캐시.get(key)
             detail = 상세캐시.get(key)
@@ -1143,7 +1380,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not 좌표:
             return {"error": f'"{q}" 위치를 찾지 못했습니다. 동네 이름을 다시 확인해 주세요.'}
         center, x, y = 좌표
-        places = 맛집검색(x, y, radius, meal, cnt, cert, rate)
+        places = 맛집검색(x, y, radius, meal, cnt, cert, rate, mine)
         result = {"center": center, "places": places}
         with 캐시잠금:
             검색캐시[key] = result
