@@ -27,8 +27,17 @@ command -v supabase >/dev/null || {
   exit 1
 }
 
+# link/deploy 는 로그인된 상태여야 한다. 안 되어 있으면 여기서 먼저 알려준다.
+supabase projects list >/dev/null 2>&1 || {
+  echo "supabase 로그인이 필요합니다. 먼저 실행하세요:" >&2
+  echo "  supabase login" >&2
+  exit 1
+}
+
 echo "▶ 1/3 DB 마이그레이션"
-supabase link --project-ref "$SUPABASE_PROJECT_REF" >/dev/null
+# link 는 데이터베이스 비밀번호를 물어본다 (프로젝트 만들 때 정한 값).
+# 잊었다면 대시보드 > Project Settings > Database 에서 재설정할 수 있다.
+supabase link --project-ref "$SUPABASE_PROJECT_REF"
 supabase db push
 
 echo "▶ 2/3 Edge Function 배포"

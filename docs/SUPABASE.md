@@ -119,7 +119,51 @@ supabase secrets set \
 
 ### 3단계 — 배포
 
+여기서 세 가지가 만들어집니다. **하나라도 빠지면 앱이 안 뜹니다.**
+
+| 만들어지는 것 | 안 됐을 때 증상 |
+|---|---|
+| DB 테이블 (마이그레이션) | 검색 시 `relation "kv_cache" does not exist` |
+| Edge Function `api` | `/functions/v1/api/config` → `Requested function was not found` |
+| Storage 버킷 `app` + `index.html` | 접속 주소 → `Bucket not found` |
+
+#### 준비물
+
+**1. 리포지토리를 로컬에 받습니다** (대시보드만으로는 배포할 수 없습니다)
+
+```bash
+git clone https://github.com/s1slp47team-blip/Etc.git
+cd Etc
+git checkout claude/restaurant-briefing-supabase-migration-jpfp91
+```
+
+**2. Supabase CLI 설치**
+
+| 환경 | 설치 |
+|---|---|
+| Windows | `scoop install supabase` — 또는 [Node.js](https://nodejs.org) 설치 후 `npx` 사용 (스크립트가 자동 감지) |
+| macOS | `brew install supabase/tap/supabase` |
+| 그 외 | https://github.com/supabase/cli/releases |
+
+**3. 로그인** — 빠뜨리기 쉽습니다
+
+```bash
+supabase login
+```
+
+브라우저가 열리고 인증 후 돌아옵니다. 이걸 안 하면 다음 단계가 바로 실패합니다.
+
+**4. 데이터베이스 비밀번호 확인**
+
+`supabase link`가 DB 비밀번호를 물어봅니다. **프로젝트를 만들 때 정했던 값**입니다.
+기억이 안 나면 https://supabase.com/dashboard/project/_/settings/database 에서
+`Reset database password`로 새로 정하면 됩니다.
+
+#### 실행
+
 service_role 키를 https://supabase.com/dashboard/project/_/settings/api 에서 복사한 뒤:
+
+**macOS · Linux · Git Bash · WSL**
 
 ```bash
 export SUPABASE_PROJECT_REF=abcdefghijklmnop
@@ -127,7 +171,35 @@ export SUPABASE_SERVICE_ROLE_KEY=eyJ...
 ./scripts/deploy.sh
 ```
 
-스크립트가 마이그레이션 적용 → 함수 배포 → `web/index.html` 업로드까지 합니다.
+**Windows PowerShell**
+
+```powershell
+$env:SUPABASE_PROJECT_REF     = "abcdefghijklmnop"
+$env:SUPABASE_SERVICE_ROLE_KEY = "eyJ..."
+.\scripts\deploy.ps1
+```
+
+두 스크립트가 하는 일은 같습니다: 마이그레이션 적용 → 함수 배포 → `web/index.html` 업로드.
+
+`▶ 1/3`, `▶ 2/3`, `▶ 3/3` 이 차례로 찍히고 마지막에 접속 주소가 나오면 성공입니다.
+중간에 멈췄다면 **거기까지만 반영된 것**이므로, 원인을 고친 뒤 스크립트를 처음부터
+다시 돌리면 됩니다 (여러 번 돌려도 안전합니다).
+
+#### 마이그레이션만 따로 하기 (DB 비밀번호가 막힐 때)
+
+`supabase link`가 계속 실패하면 마이그레이션만 대시보드에서 처리할 수 있습니다.
+
+1. https://supabase.com/dashboard/project/_/sql 열기
+2. `supabase/migrations/20260807000000_init.sql` 전체 내용을 붙여넣고 `Run`
+3. 그다음 함수·업로드만 실행:
+
+```bash
+supabase functions deploy api --project-ref "$SUPABASE_PROJECT_REF"
+```
+
+버킷과 프론트는 대시보드에서도 됩니다 —
+https://supabase.com/dashboard/project/_/storage/buckets 에서
+`New bucket` → 이름 `app`, **Public bucket 켜기** → 만든 뒤 `web/index.html` 업로드.
 
 ### 4단계 — 카카오 개발자 콘솔에 도메인 등록 (지도를 쓸 때만)
 
