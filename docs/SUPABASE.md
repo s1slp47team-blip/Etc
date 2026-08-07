@@ -11,7 +11,7 @@ Render는 프로세스를 계속 띄워주는 PaaS이고, Supabase는 Postgres·
 | 원본 (Render) | 이전 후 (Supabase) |
 |---|---|
 | `http.server` + `Handler` | Edge Function `api` (Deno) |
-| 파이썬 문자열에 박힌 `PAGE` HTML | Storage 공개 버킷의 정적 `web/index.html` |
+| 파이썬 문자열에 박힌 `PAGE` HTML | 같은 방식 — Edge Function 이 `web/index.html` 을 서빙 |
 | `검색캐시`, `상세캐시` (메모리 dict) | `kv_cache` 테이블 (scope=`search`/`detail`) |
 | `_상세결과캐시`, `_인증맵캐시` (메모리) | `kv_cache` (scope=`place`/`cert`/`photo`) |
 | `_내맛집캐시` (메모리 1시간) | `my_places` 테이블 + `my_places_sync` |
@@ -125,7 +125,7 @@ supabase secrets set \
 |---|---|
 | DB 테이블 (마이그레이션) | 검색 시 `relation "kv_cache" does not exist` |
 | Edge Function `api` | `/functions/v1/api/config` → `Requested function was not found` |
-| Storage 버킷 `app` + `index.html` | 접속 주소 → `Bucket not found` |
+| Storage 버킷 `app` + `index.html` (선택) | 버킷 주소만 `Bucket not found` — 함수 주소로는 정상 동작 |
 
 #### 준비물
 
@@ -214,7 +214,8 @@ where table_schema = 'public' order by table_name;
 
 함수는 원래 9개 파일로 나뉘어 있어 편집기에 그대로 넣기 어렵습니다. 이를 위해
 **한 파일로 합친 `supabase/functions/api/bundled.ts`** 를 리포지토리에 넣어두었습니다
-(53KB, 1400여 줄). `supabase-js` 는 외부 참조로 남겨 Edge Runtime 이 알아서 받습니다.
+(84KB, 2000여 줄). `supabase-js` 는 외부 참조로 남겨 Edge Runtime 이 알아서 받고,
+화면 HTML 은 번들 안에 들어 있어 Storage 업로드가 필요 없습니다.
 
 1. https://supabase.com/dashboard/project/_/functions → `Create a new function`
 2. 이름을 정확히 **`api`** 로 지정 (다른 이름이면 프론트가 못 찾습니다)
@@ -228,16 +229,16 @@ where table_schema = 'public' order by table_name;
 `bundled.ts` 는 자동 생성 파일입니다. 원본 9개 파일을 고쳤다면 `./scripts/bundle.sh`
 로 다시 만들어야 합니다 (deno 필요). CLI 로 배포한다면 이 파일은 쓰이지 않습니다.
 
-#### ③ 프론트 — Storage
+#### ③ 프론트 — 할 일 없음
 
-https://supabase.com/dashboard/project/_/storage/buckets
+함수가 화면 HTML 을 직접 서빙합니다 (`web/index.html` 이 번들에 들어 있습니다).
+Storage 버킷을 만들 필요도, 파일을 올릴 필요도 없습니다.
 
-1. `New bucket` → 이름 **`app`** → **Public bucket 켜기** → 저장
-2. 만들어진 버킷에 `web/index.html` 업로드
-   — https://raw.githubusercontent.com/s1slp47team-blip/Etc/claude/restaurant-briefing-supabase-migration-jpfp91/web/index.html
-     를 `index.html` 로 저장한 뒤 올리면 됩니다. 파일 이름이 정확히 `index.html` 이어야 합니다.
+②까지 끝났으면 **바로 접속하면 됩니다**:
 
-셋 다 끝나면 5단계 접속 주소로 들어가면 됩니다.
+```
+https://<ref>.supabase.co/functions/v1/api
+```
 
 #### 마이그레이션만 따로 하기 (DB 비밀번호가 막힐 때)
 
@@ -270,10 +271,14 @@ https://abcdefghijklmnop.supabase.co
 ### 5단계 — 접속
 
 ```
-https://abcdefghijklmnop.supabase.co/storage/v1/object/public/app/index.html
+https://abcdefghijklmnop.supabase.co/functions/v1/api
 ```
 
 이 주소가 Render URL을 대체합니다. 북마크해 두세요.
+
+함수가 화면 HTML 을 직접 서빙하므로 이 주소 하나면 됩니다. `scripts/deploy.sh` 는
+같은 화면을 Storage 버킷에도 올려두는데(`.../storage/v1/object/public/app/index.html`),
+둘 중 아무 주소나 쓰면 됩니다 — 버킷 쪽은 없어도 앱이 동작합니다.
 
 ### 6단계 — 잘 들어갔는지 확인
 

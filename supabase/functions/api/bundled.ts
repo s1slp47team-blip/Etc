@@ -1235,6 +1235,545 @@ async function \uD1A0\uD070\uC720\uD6A8(token) {
   return \uAC19\uC740\uAC00(sig, await \uC11C\uBA85(exp));
 }
 
+// supabase/functions/api/page.ts
+var PAGE = `<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>\uB9DB\uC9D1 \uBE0C\uB9AC\uD551</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: 'Malgun Gothic', sans-serif; margin: 0; background: #f4f6f9; }
+  header { padding: 12px 20px; background: #1d2a3a;
+           background-image: linear-gradient(120deg, #141e30, #2c3e50);
+           border-bottom: 2px solid #c9a227;
+           display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+           position: sticky; top: 0; z-index: 10; }
+  header h1 { color: #fff; font-size: 1.05em; margin: 0 12px 0 0; white-space: nowrap; }
+  header input { flex: 1; max-width: 380px; padding: 9px 12px; font-size: 1em; border: 0; border-radius: 6px; }
+  header select { padding: 9px 8px; font-size: .95em; border: 0; border-radius: 6px; }
+  header button { padding: 9px 18px; font-size: 1em; border: 0; border-radius: 6px;
+                  background: #c9a227; color: #16222e; font-weight: bold; cursor: pointer; }
+  header button:hover { background: #dbb948; }
+  #status { color: #b9c6d8; font-size: .85em; margin-left: 8px; }
+  #results { max-width: 1200px; margin: 0 auto; padding: 16px 20px 40px;
+             display: flex; flex-wrap: wrap; justify-content: space-between;
+             align-items: flex-start; }
+  .notice { color: #777; font-size: .9em; padding: 24px 4px; white-space: pre-wrap; width: 100%; }
+  .card { background: #fff; border: 1px solid #e3e6ea; border-radius: 12px; padding: 16px 20px;
+          margin-bottom: 12px; width: calc(50% - 6px); }
+  @media (max-width: 920px) { .card { width: 100%; } }
+  .top { display: flex; gap: 16px; }
+  .photo { width: 104px; height: 104px; border-radius: 8px; background: #e8eef7; flex-shrink: 0;
+           display: flex; align-items: center; justify-content: center; color: #8aa4c8;
+           font-size: .78em; overflow: hidden; }
+  .photo img { width: 100%; height: 100%; object-fit: cover; }
+  .info { flex: 1; min-width: 0; }
+  .name { font-size: 1.05em; font-weight: bold; color: #0a4da3; text-decoration: none; }
+  .name:hover { text-decoration: underline; }
+  .meta { color: #888; font-size: .84em; margin-left: 8px; }
+  .rate { color: #e59a13; font-size: .88em; font-weight: bold; margin-left: 8px; white-space: nowrap; }
+  .badge { display: inline-block; font-size: .8em; padding: 2px 10px; border-radius: 10px;
+           background: #e1f5ee; color: #085041; margin-left: 8px; vertical-align: 1px; }
+  .badge.wait { background: #f0f2f5; color: #666; }
+  .cert { display: inline-block; font-size: .76em; font-weight: bold; padding: 2px 9px;
+          border-radius: 9px; margin-left: 6px; vertical-align: 1px; }
+  .cert.c-mi { background: #7d0f0f; color: #fff; }
+  .cert.c-bl { background: #123c8a; color: #fff; }
+  .cert.c-hu { background: #6a4b16; color: #fff; }
+  .cert.c-bw { background: #111; color: #fff; border: 1px solid #555; }
+  .cert.c-my { background: #d63b5b; color: #fff; }   /* \uAC00\uBCF8\uACF3 */
+  .cert.c-my2 { background: #fdeaee; color: #b02a45; border: 1px solid #f3c2ce; }  /* \uAC00\uBCFC\uACF3 */
+  .cert.c-cf { background: #6b4a2f; color: #fff; }   /* \uC800\uC7A5\uD55C \uCE74\uD398 */
+  #mapbtn { background: #2c3e50; color: #fff; }
+  #mapbtn:hover { background: #3d5368; }
+  #mapwrap { max-width: 1200px; margin: 14px auto 0; padding: 0 20px; display: none; }
+  #allmap { width: 100%; height: 460px; border: 1px solid #d8dee6; border-radius: 12px;
+            background: #eef1f5; }
+  .map-hint { color: #778; font-size: .82em; margin: 6px 2px 0; }
+  table.facts { width: 100%; font-size: .9em; margin-top: 8px; border-collapse: collapse; }
+  table.facts td { padding: 3px 0; vertical-align: top; }
+  table.facts td:first-child { color: #888; width: 76px; }
+  .skeleton { color: #b5bcc7; }
+  .reviews { border-top: 1px solid #eee; margin-top: 12px; padding-top: 10px;
+             font-size: .9em; color: #555; line-height: 1.6; }
+  .reviews p { margin: 0 0 4px; }
+  .reviews p::before { content: '\\201C'; color: #b0bdd0; margin-right: 2px; }
+  .reviews p::after { content: '\\201D'; color: #b0bdd0; margin-left: 2px; }
+
+  /* \uC9C4\uD589 \uB9C9\uB300 \u2014 \uBE0C\uB9AC\uD551\uC774 \uCCAD\uD06C \uB2E8\uC704\uB85C \uCC44\uC6CC\uC9C0\uBBC0\uB85C \uC9C4\uD589\uB960\uC744 \uBCF4\uC5EC\uC900\uB2E4 */
+  #progress { width: 100%; max-width: 1200px; margin: 0 auto; padding: 0 20px; display: none; }
+  #progress .bar { height: 4px; background: #dfe4ea; border-radius: 2px; overflow: hidden; }
+  #progress .fill { height: 100%; width: 0; background: #c9a227; transition: width .3s; }
+
+  /* \uC811\uC18D \uC554\uD638 */
+  #login { position: fixed; inset: 0; z-index: 100;
+           background-image: linear-gradient(120deg, #141e30, #2c3e50);
+           display: none; align-items: center; justify-content: center; }
+  #login .box { background: #fff; border-radius: 14px; padding: 34px 38px; width: 320px; text-align: center; }
+  #login h1 { font-size: 1.15em; color: #1d2a3a; margin: 0 0 18px; }
+  #login input { width: 100%; padding: 11px 12px; font-size: 1em; border: 1px solid #ccd3dc;
+                 border-radius: 8px; margin-bottom: 12px; }
+  #login button { width: 100%; padding: 11px; font-size: 1em; background: #c9a227; color: #16222e;
+                  border: 0; border-radius: 8px; font-weight: bold; cursor: pointer; }
+  #login .err { color: #c0392b; font-size: .85em; margin-top: 10px; min-height: 1em; }
+
+  /* \u2500\u2500 \uBAA8\uBC14\uC77C \uB808\uC774\uC544\uC6C3 (\uD3F0\uC5D0\uC11C \uC790\uB3D9 \uC801\uC6A9, PC \uD654\uBA74\uC740 \uC601\uD5A5 \uC5C6\uC74C) \u2500\u2500 */
+  @media (max-width: 640px) {
+    body { font-size: 17px; }
+    header { padding: 10px 12px; gap: 6px; position: static; }
+    header h1 { font-size: 1.15em; margin-right: 4px; }
+    header input { flex: 1 1 100%; max-width: none; font-size: 16px; padding: 12px; }
+    header select { flex: 1 1 30%; font-size: 15px; padding: 11px 6px; }
+    header button { flex: 1 1 45%; font-size: 16px; padding: 12px; }
+    #status { flex: 1 1 100%; margin-left: 0; font-size: .9em; }
+    #results { padding: 10px 10px 40px; }
+    .card { width: 100%; padding: 14px; margin-bottom: 10px; border-radius: 14px; }
+    .top { gap: 12px; }
+    .photo { width: 92px; height: 92px; }
+    .name { font-size: 1.15em; display: inline-block; margin-bottom: 2px; }
+    .meta { display: block; margin-left: 0; margin-top: 2px; font-size: .86em; }
+    .rate { font-size: .95em; }
+    table.facts { font-size: .95em; margin-top: 10px; }
+    table.facts td { padding: 4px 0; }
+    table.facts td:first-child { width: 64px; }
+    .reviews { font-size: .95em; }
+    #mapwrap { padding: 0 8px; }
+    #allmap { height: 340px; }
+    .notice { font-size: .95em; padding: 16px 6px; }
+    #progress { padding: 0 10px; }
+  }
+</style>
+</head>
+<body>
+<div id="login">
+  <div class="box">
+    <h1>\uB9DB\uC9D1 \uBE0C\uB9AC\uD551</h1>
+    <input id="pw" type="password" placeholder="\uC811\uC18D \uC554\uD638" autofocus
+           onkeydown="if(event.key==='Enter'||event.keyCode===13)doLogin()">
+    <button onclick="doLogin()">\uC785\uC7A5</button>
+    <p class="err" id="loginerr"></p>
+  </div>
+</div>
+
+<header>
+  <h1>\uB9DB\uC9D1 \uBE0C\uB9AC\uD551</h1>
+  <input id="q" placeholder="\uB3D9\uB124 \uC774\uB984 (\uC608: \uC5ED\uC0BC\uB3D9, \uC11C\uCD08\uB3D9, \uD310\uAD50)" onkeydown="if(event.key==='Enter'||event.keyCode===13)doSearch()">
+  <select id="meal" title="\uC2DC\uAC04\uB300\uBCC4 \uCD94\uCC9C \uAE30\uC900">
+    <option value="all" selected>\uC804\uCCB4</option>
+    <option value="lunch">\uC810\uC2EC (\uC2DD\uC0AC \uC704\uC8FC)</option>
+    <option value="dinner">\uC800\uB141 (\uC220 \uD55C\uC794)</option>
+    <option value="cafe">\uCE74\uD398 \xB7 \uB514\uC800\uD2B8</option>
+  </select>
+  <select id="radius">
+    <option value="500">500m</option>
+    <option value="1000">1km</option>
+    <option value="1500">1.5km</option>
+    <option value="2000" selected>2km</option>
+    <option value="3000">3km</option>
+  </select>
+  <select id="cnt" title="\uCD94\uCD9C \uAC1C\uC218">
+    <option value="10">10\uACF3</option>
+    <option value="20">20\uACF3</option>
+    <option value="30" selected>30\uACF3</option>
+    <option value="40">40\uACF3</option>
+    <option value="50">50\uACF3</option>
+    <option value="60">60\uACF3</option>
+    <option value="70">70\uACF3</option>
+    <option value="80">80\uACF3</option>
+    <option value="90">90\uACF3</option>
+    <option value="100">100\uACF3</option>
+  </select>
+  <select id="cert" title="\uC778\uC99D \uB9DB\uC9D1 \uD544\uD130 (\uCE74\uCE74\uC624\uB9F5 \uAC80\uC0C9 \uC5F0\uAD00 \uAE30\uC900)">
+    <option value="none" selected>\uC778\uC99D \uBB34\uAD00</option>
+    <option value="any">\uC778\uC99D\uB9DB\uC9D1\uB9CC (\uD1B5\uD569)</option>
+    <option value="michelin">\uBBF8\uC250\uB9B0 \uAC00\uC774\uB4DC</option>
+    <option value="blueribbon">\uBE14\uB8E8\uB9AC\uBCF8</option>
+    <option value="century">\uBC31\uB144\uAC00\uAC8C</option>
+    <option value="bwchef">\uD751\uBC31\uC694\uB9AC\uC0AC</option>
+  </select>
+  <select id="rate" title="\uCE74\uCE74\uC624\uB9F5 \uBCC4\uC810 \uD544\uD130">
+    <option value="0" selected>\uD3C9\uC810 \uBB34\uAD00</option>
+    <option value="4">\u26054.0 \uC774\uC0C1</option>
+  </select>
+  <select id="mine" title="\uB124\uC774\uBC84\uC9C0\uB3C4\uC5D0 \uC800\uC7A5\uD574\uB454 \uB0B4 \uB9DB\uC9D1">
+    <option value="prefer" selected>\uB0B4 \uC800\uC7A5 \uC6B0\uC120</option>
+    <option value="only">\uB0B4 \uC800\uC7A5\uB9CC</option>
+    <option value="off">\uB0B4 \uC800\uC7A5 \uBB34\uC2DC</option>
+  </select>
+  <button onclick="doSearch()">\uAC80\uC0C9</button>
+  <button id="mapbtn" onclick="toggleMap()" style="display:none">\uC9C0\uB3C4\uB85C \uBCF4\uAE30</button>
+  <span id="status"></span>
+</header>
+<div id="progress"><div class="bar"><div class="fill" id="pfill"></div></div></div>
+<div id="mapwrap">
+  <div id="allmap"></div>
+  <p class="map-hint">\uBC88\uD638 \uD540\uC744 \uD074\uB9AD\uD558\uBA74 \uAC00\uAC8C \uC774\uB984\uC774 \uD45C\uC2DC\uB429\uB2C8\uB2E4. \uCE74\uB4DC \uBAA9\uB85D\uC758 \uBC88\uD638\uC640 \uB3D9\uC77C\uD569\uB2C8\uB2E4.</p>
+</div>
+<div id="results">
+  <div class="notice">\uB3D9\uB124 \uC774\uB984\uC744 \uC785\uB825\uD558\uBA74 \uBC18\uACBD \uC774\uB0B4 \uB9DB\uC9D1\uC744 \uCC3E\uC544
+\uC0AC\uC9C4 \xB7 \uC8FC\uC694 \uBA54\uB274 \xB7 \uAC00\uACA9\uB300 \xB7 \uBE14\uB85C\uADF8 \uBC18\uC751\uC744 \uC815\uB9AC\uD574 \uB4DC\uB9BD\uB2C8\uB2E4.
+
+\uC2DC\uAC04\uB300\uB97C \uACE0\uB974\uBA74 \uAE30\uC900\uC774 \uB2EC\uB77C\uC9D1\uB2C8\uB2E4:
+\xB7 \uC810\uC2EC \u2014 \uC2DD\uC0AC \uC704\uC8FC (\uC220\uC9D1\xB7\uC548\uC8FC \uC804\uBB38\uC810 \uC81C\uC678)
+\xB7 \uC800\uB141 \u2014 \uC220\uC744 \uACC1\uB4E4\uC774\uAE30 \uC88B\uC740 \uC9D1 (\uACE0\uAE30\xB7\uD68C\xB7\uC8FC\uC810 \uB4F1)
+\xB7 \uCE74\uD398\xB7\uB514\uC800\uD2B8 \u2014 \uCE74\uD398\xB7\uBCA0\uC774\uCEE4\uB9AC\xB7\uB514\uC800\uD2B8 \uC804\uBB38\uC810 (\uB8F8\uCE74\uD398 \uB4F1 \uC81C\uC678)
+
+\uB0B4 \uC800\uC7A5 \uB9DB\uC9D1(\uB124\uC774\uBC84\uC9C0\uB3C4\uC5D0 \uC800\uC7A5\uD55C \uB9AC\uC2A4\uD2B8)\uC740 \uAE30\uBCF8\uC73C\uB85C \uB9E8 \uC704\uC5D0 \u2665\uAC00\uBCF8\uACF3\xB7\u2661\uAC00\uBCFC\uACF3
+\uBC30\uC9C0\uC640 \uD568\uAED8 \uD45C\uC2DC\uB429\uB2C8\uB2E4. "\uB0B4 \uC800\uC7A5\uB9CC" \uC120\uD0DD \uC2DC \uC800\uC7A5\uD55C \uACF3\uB9CC \uBCFC \uC218 \uC788\uC2B5\uB2C8\uB2E4.
+
+\uC778\uC99D \uD544\uD130(\uBBF8\uC250\uB9B0 \uAC00\uC774\uB4DC\xB7\uBE14\uB8E8\uB9AC\uBCF8\xB7\uBC31\uB144\uAC00\uAC8C\xB7\uD751\uBC31\uC694\uB9AC\uC0AC)\uB294 \uCE74\uCE74\uC624\uB9F5 \uAC80\uC0C9 \uC5F0\uAD00 \uAE30\uC900\uC758
+\uCC38\uACE0\uC6A9 \uBD84\uB958\uC785\uB2C8\uB2E4. \uACF5\uC2DD \uBA85\uBD80\uAC00 \uACF5\uAC1C\uB418\uC5B4 \uC788\uC9C0 \uC54A\uC544 \uB204\uB77D\xB7\uC624\uD3EC\uD568\uC774 \uC788\uC744 \uC218
+\uC788\uC73C\uBA70, \uBE14\uB8E8\uB9AC\uBCF8\uC740 \uB370\uC774\uD130\uAC00 \uC801\uC5B4 \uACB0\uACFC\uAC00 \uC5C6\uC744 \uC218 \uC788\uC2B5\uB2C8\uB2E4.
+
+\uC608) "\uC5ED\uC0BC\uB3D9" / "\uC11C\uCD08\uB3D9" / "\uD310\uAD50" / "\uAC15\uB0A8\uC5ED"</div>
+</div>
+
+<script>
+// IE \uBAA8\uB4DC/\uAD6C\uD615 \uBE0C\uB77C\uC6B0\uC800\uC5D0\uC11C\uB3C4 \uB3D9\uC791\uD558\uB3C4\uB85D ES5 \uBB38\uBC95(var, function, XHR)\uB9CC \uC0AC\uC6A9\uD55C\uB2E4.
+
+// \u2500\u2500 API \uC8FC\uC18C \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// \uC774 \uD398\uC774\uC9C0\uB294 Supabase Storage \uACF5\uAC1C \uBC84\uD0B7\uC5D0\uC11C \uC11C\uBE59\uB418\uACE0, Edge Function \uC740 \uAC19\uC740
+// \uD638\uC2A4\uD2B8\uC758 /functions/v1/api \uC5D0 \uC788\uB2E4 \u2192 \uAE30\uBCF8\uAC12\uC740 \uD604\uC7AC \uC624\uB9AC\uC9C4.
+// \uB2E4\uB978 \uACF3(\uB85C\uCEEC \uD30C\uC77C\xB7\uBCC4\uB3C4 \uB3C4\uBA54\uC778)\uC5D0 \uC62C\uB9B4 \uB54C\uB294 ?api=... \uB85C \uB36E\uC5B4\uC4F8 \uC218 \uC788\uB2E4.
+var API = (function () {
+  var m = location.search.match(/[?&]api=([^&]+)/);
+  if (m) return decodeURIComponent(m[1]).replace(/\\/+$/, '');
+  if (window.API_BASE) return String(window.API_BASE).replace(/\\/+$/, '');
+  return location.origin + '/functions/v1/api';
+})();
+
+var TOKEN = '';
+try { TOKEN = localStorage.getItem('food_token') || ''; } catch (e) { TOKEN = ''; }
+
+function ajax(method, path, body, cb) {
+  var xhr = new XMLHttpRequest();
+  xhr.open(method, API + path, true);
+  if (body) xhr.setRequestHeader('Content-Type', 'application/json');
+  if (TOKEN) xhr.setRequestHeader('X-App-Token', TOKEN);
+  xhr.onreadystatechange = function () {
+    if (xhr.readyState !== 4) return;
+    var data = null;
+    try { data = JSON.parse(xhr.responseText); } catch (e) { data = null; }
+    if (xhr.status === 401 && data && data.need_login) { showLogin(); cb(new Error('\uC778\uC99D \uD544\uC694'), null); return; }
+    if (xhr.status !== 200) { cb(new Error((data && data.error) || ('HTTP ' + xhr.status)), null); return; }
+    if (!data) { cb(new Error('\uC751\uB2F5\uC744 \uD574\uC11D\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4'), null); return; }
+    cb(null, data);
+  };
+  xhr.onerror = function () { cb(new Error('\uB124\uD2B8\uC6CC\uD06C \uC624\uB958'), null); };
+  xhr.send(body || null);
+}
+
+// \u2500\u2500 \uC811\uC18D \uC554\uD638 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function showLogin() { document.getElementById('login').style.display = 'flex'; }
+function hideLogin() { document.getElementById('login').style.display = 'none'; }
+
+function doLogin() {
+  var pw = document.getElementById('pw').value;
+  var err = document.getElementById('loginerr');
+  err.textContent = '';
+  ajax('POST', '/login', JSON.stringify({ pw: pw }), function (e, data) {
+    if (e || !data || !data.token) { err.textContent = '\uC554\uD638\uAC00 \uC62C\uBC14\uB974\uC9C0 \uC54A\uC2B5\uB2C8\uB2E4.'; return; }
+    TOKEN = data.token;
+    try { localStorage.setItem('food_token', TOKEN); } catch (e2) {}
+    hideLogin();
+    loadSdk();
+  });
+}
+
+function boot() {
+  ajax('GET', '/config', null, function (err, cfg) {
+    if (err) { document.getElementById('status').textContent = '\uC11C\uBC84\uC5D0 \uC5F0\uACB0\uD558\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4: ' + err.message; return; }
+    if (cfg.auth_required && !TOKEN) { showLogin(); return; }
+    if (cfg.map) loadSdk();
+  });
+}
+
+// \uCE74\uCE74\uC624\uB9F5 JS SDK \uB294 Edge Function \uC774 \uD504\uB85D\uC2DC\uD55C\uB2E4 (\uC571\uD0A4\uB294 \uC11C\uBC84\uC5D0\uB9CC \uC874\uC7AC).
+var sdkLoaded = false;
+function loadSdk() {
+  if (sdkLoaded) return;
+  sdkLoaded = true;
+  var s = document.createElement('script');
+  s.src = API + '/sdk';
+  s.onerror = function () { sdkLoaded = false; };
+  document.body.appendChild(s);
+}
+
+// \u2500\u2500 \uAC80\uC0C9 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var searching = false;
+var lastPlaces = [];  // \uC9C0\uB3C4 \uD45C\uC2DC\uC6A9 \u2014 \uB9C8\uC9C0\uB9C9 \uAC80\uC0C9 \uACB0\uACFC
+
+function \uC870\uAC74() {
+  return {
+    q: document.getElementById('q').value.replace(/^\\s+|\\s+$/g, ''),
+    radius: document.getElementById('radius').value,
+    meal: document.getElementById('meal').value,
+    cnt: document.getElementById('cnt').value,
+    cert: document.getElementById('cert').value,
+    rate: document.getElementById('rate').value,
+    mine: document.getElementById('mine').value
+  };
+}
+
+function doSearch() {
+  if (searching) return;
+  var c = \uC870\uAC74();
+  if (!c.q) return;
+  searching = true;
+  setProgress(0, 0);
+
+  var status = document.getElementById('status');
+  var results = document.getElementById('results');
+  status.textContent = (c.cert !== 'none' || c.rate === '4')
+    ? '\uC74C\uC2DD\uC810 \uAC80\uC0C9 + \uC778\uC99D\xB7\uD3C9\uC810 \uD655\uC778 \uC911... (10~30\uCD08)' : '\uC8FC\uBCC0 \uC74C\uC2DD\uC810 \uAC80\uC0C9 \uC911...';
+
+  var qs = '/search?q=' + encodeURIComponent(c.q) + '&radius=' + c.radius + '&meal=' + c.meal
+         + '&cnt=' + c.cnt + '&cert=' + c.cert + '&rate=' + c.rate + '&mine=' + c.mine;
+
+  ajax('GET', qs, null, function (err, data) {
+    if (err) { status.textContent = '\uC624\uB958: ' + err.message; searching = false; return; }
+    if (data.error) {
+      results.innerHTML = '<div class="notice">' + esc(data.error) + '</div>';
+      status.textContent = '';
+      searching = false;
+      return;
+    }
+    lastPlaces = data.places;
+    document.getElementById('mapbtn').style.display = data.places.length ? '' : 'none';
+    renderMap();  // \uC9C0\uB3C4\uAC00 \uC5F4\uB824 \uC788\uC73C\uBA74 \uC0C8 \uACB0\uACFC\uB85C \uAC31\uC2E0
+    renderBase(data);
+
+    if (data.cached_detail) {
+      fillDetail(data.cached_detail, 0);
+      status.textContent = data.center + ' \xB7 ' + data.places.length + '\uACF3 (\uCE90\uC2DC)';
+      searching = false;
+      return;
+    }
+    runBriefing(c, data);
+  });
+}
+
+// \u2500\u2500 \uBE0C\uB9AC\uD551 (\uCCAD\uD06C \uBC29\uC2DD) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Edge Function \uC740 \uC694\uCCAD\uB2F9 \uC2E4\uD589\uC2DC\uAC04 \uC81C\uD55C\uC774 \uC788\uC5B4 30~100\uACF3\uC744 \uD55C \uBC88\uC5D0 \uBABB \uB3CC\uB9B0\uB2E4.
+// start \uB85C \uC7A1\uC744 \uB9CC\uB4E4\uACE0 step \uC744 \uBC18\uBCF5 \uD638\uCD9C\uD55C\uB2E4. \uB450 \uAC1C\uB97C \uB3D9\uC2DC\uC5D0 \uAD74\uB824 \uC2DC\uAC04\uC744 \uC904\uC778\uB2E4.
+function runBriefing(c, data) {
+  var status = document.getElementById('status');
+  status.textContent = '\uBE14\uB85C\uADF8 \uD6C4\uAE30 \uBD84\uC11D \uC911... (' + (data.places.length <= 30 ? '30~40\uCD08' : '1~2\uBD84') + ')';
+
+  ajax('POST', '/enrich/start', JSON.stringify(c), function (err, job) {
+    if (err) { status.textContent = '\uC624\uB958: ' + err.message; searching = false; return; }
+    if (job.error) { status.textContent = job.error; searching = false; return; }
+    if (job.done) {  // \uC774\uBBF8 \uC644\uC131\uB41C \uBE0C\uB9AC\uD551\uC774 \uCE90\uC2DC\uC5D0 \uC788\uC5C8\uB2E4
+      fillDetail(job.items, 0);
+      status.textContent = data.center + ' \xB7 ' + data.places.length + '\uACF3 (\uCE90\uC2DC)';
+      searching = false;
+      return;
+    }
+
+    var total = job.total;
+    var workers = total > job.step ? 2 : 1;  // \uAD6C\uAC04\uC774 \uD558\uB098\uBA74 \uC6CC\uCEE4\uB3C4 \uD558\uB098\uBA74 \uCDA9\uBD84
+    var remaining = workers, stalled = 0, finished = false;
+    setProgress(0, total);
+
+    function \uB05D (msg) {
+      if (finished) return;
+      finished = true;
+      searching = false;
+      setProgress(total, total);
+      setTimeout(function () { document.getElementById('progress').style.display = 'none'; }, 600);
+      status.textContent = msg;
+    }
+
+    function step() {
+      ajax('POST', '/enrich/step', JSON.stringify({ job: job.job }), function (e2, res) {
+        if (finished) return;
+        if (e2) { remaining--; if (!remaining) \uB05D('\uC624\uB958: ' + e2.message); return; }
+        if (res.error) { remaining--; if (!remaining) \uB05D(res.error); return; }
+
+        if (res.items && res.items.length) fillDetail(res.items, res.start);
+        setProgress(res.processed, res.total);
+
+        if (res.done) { \uB05D(data.center + ' \xB7 ' + total + '\uACF3 \uBD84\uC11D \uC644\uB8CC'); return; }
+
+        if (res.start >= res.end) {
+          // \uBC30\uC815\uD560 \uAD6C\uAC04\uC774 \uC5C6\uB2E4 = \uB2E4\uB978 \uC6CC\uCEE4\uAC00 \uC544\uC9C1 \uCC98\uB9AC \uC911. \uC7A0\uC2DC \uB4A4 \uB2E4\uC2DC \uD655\uC778\uD55C\uB2E4.
+          if (++stalled > 40) { \uB05D('\uC77C\uBD80 \uAD6C\uAC04\uC774 \uC9C0\uC5F0\uB418\uACE0 \uC788\uC2B5\uB2C8\uB2E4. \uB2E4\uC2DC \uAC80\uC0C9\uD574 \uC8FC\uC138\uC694.'); return; }
+          setTimeout(step, 2000);
+          return;
+        }
+        stalled = 0;
+        step();
+      });
+    }
+
+    step();
+    // \uB450 \uBC88\uC9F8 \uC6CC\uCEE4\uB294 \uC0B4\uC9DD \uB2A6\uAC8C \uC2DC\uC791\uD574 \uAC19\uC740 \uC21C\uAC04\uC5D0 \uAD6C\uAC04\uC744 \uB2E4\uD22C\uC9C0 \uC54A\uAC8C \uD55C\uB2E4
+    if (workers > 1) setTimeout(function () { if (!finished) step(); }, 400);
+  });
+}
+
+function setProgress(done, total) {
+  var wrap = document.getElementById('progress');
+  if (!total) { wrap.style.display = 'none'; return; }
+  wrap.style.display = 'block';
+  document.getElementById('pfill').style.width = Math.round(done / total * 100) + '%';
+}
+
+// \u2500\u2500 \uB80C\uB354\uB9C1 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+function renderBase(data) {
+  var results = document.getElementById('results');
+  if (!data.places.length) {
+    results.innerHTML = '<div class="notice">\uBC18\uACBD \uB0B4 \uC74C\uC2DD\uC810\uC744 \uCC3E\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.</div>';
+    return;
+  }
+  results.innerHTML = data.places.map(function (p, i) {
+    var certs = (p.badges || []).map(function (b) {
+      var cls;
+      if (b.indexOf('\u2615') >= 0) cls = 'c-cf';
+      else if (b.indexOf('\uAC00\uBCF8\uACF3') >= 0) cls = 'c-my';
+      else if (b.indexOf('\uAC00\uBCFC\uACF3') >= 0 || b.indexOf('\uB0B4\uC800\uC7A5') >= 0) cls = 'c-my2';
+      else if (b === '\uBBF8\uC250\uB9B0') cls = 'c-mi';
+      else if (b === '\uBE14\uB8E8\uB9AC\uBCF8') cls = 'c-bl';
+      else if (b === '\uD751\uBC31\uC694\uB9AC\uC0AC') cls = 'c-bw';
+      else cls = 'c-hu';
+      return '<span class="cert ' + cls + '">' + esc(b) + '</span>';
+    }).join('');
+    var rating = p.rating ? '\u2605' + p.rating + (p.rating_count ? ' (' + p.rating_count + ')' : '') : '';
+    var hours = p.hours ? esc(p.hours) + (p.open_status ? ' \xB7 ' + esc(p.open_status) : '') : '\uC815\uBCF4 \uC5C6\uC74C';
+    var reserve = p.booking ? '\uCE74\uCE74\uC624\uB9F5 \uC608\uC57D \uAC00\uB2A5'
+                : (p.phone ? '\uC804\uD654 \uC608\uC57D \uBB38\uC758 (' + esc(p.phone) + ')' : '\uB9E4\uC7A5 \uBB38\uC758');
+    return '<div class="card" id="card-' + i + '">'
+    + '<div class="top">'
+    +   '<div class="photo" id="photo-' + i + '">\uC0AC\uC9C4 \uC900\uBE44 \uC911</div>'
+    +   '<div class="info">'
+    +     '<a class="name" href="' + esc(p.url) + '" target="_blank" title="\uCE74\uCE74\uC624\uB9F5\uC5D0\uC11C \uBCC4\uC810\xB7\uC0C1\uC138 \uBCF4\uAE30">' + (i + 1) + '. ' + esc(p.name) + '</a>'
+    +     certs
+    +     '<span class="meta">' + esc(p.category) + (p.distance != null ? ' \xB7 ' + fmtDist(p.distance) : '') + '</span>'
+    +     '<span class="rate" id="rate-' + i + '">' + rating + '</span>'
+    +     '<span class="badge wait" id="mood-' + i + '">\uBD84\uC11D \uC911</span>'
+    +     '<table class="facts">'
+    +       '<tr><td>\uC8FC\uC694 \uBA54\uB274</td><td class="skeleton" id="menu-' + i + '">\uBE14\uB85C\uADF8 \uD6C4\uAE30 \uBD84\uC11D \uC911...</td></tr>'
+    +       '<tr><td>\uAC00\uACA9\uB300</td><td class="skeleton" id="price-' + i + '">...</td></tr>'
+    +       '<tr><td>\uC601\uC5C5\uC2DC\uAC04</td><td>' + hours + '</td></tr>'
+    +       '<tr><td>\uC608\uC57D</td><td>' + reserve + '</td></tr>'
+    +       '<tr><td>\uC8FC\uC18C</td><td>' + esc(p.address) + (p.phone ? ' \xB7 ' + esc(p.phone) : '') + '</td></tr>'
+    +     '</table>'
+    +   '</div>'
+    + '</div>'
+    + '<div class="reviews" id="reviews-' + i + '" style="display:none"></div>'
+    + '</div>';
+  }).join('');
+}
+
+// offset: \uC774 \uCCAD\uD06C\uAC00 \uC804\uCCB4 \uBAA9\uB85D\uC5D0\uC11C \uC2DC\uC791\uD558\uB294 \uC704\uCE58 (\uCCAD\uD06C \uBC29\uC2DD\uC774\uB77C \uD544\uC694)
+function fillDetail(items, offset) {
+  offset = offset || 0;
+  items.forEach(function (d, k) {
+    if (!d) return;
+    var i = offset + k;
+    var photo = document.getElementById('photo-' + i);
+    if (photo) {
+      if (d.photo) {
+        var img = document.createElement('img');
+        img.referrerPolicy = 'no-referrer';
+        img.alt = '';
+        img.onerror = function () { photo.textContent = '\uC0AC\uC9C4 \uC5C6\uC74C'; };
+        img.src = d.photo;
+        photo.textContent = '';
+        photo.appendChild(img);
+      } else {
+        photo.textContent = '\uC0AC\uC9C4 \uC5C6\uC74C';
+      }
+    }
+    setText('menu-' + i, d.menu);
+    setText('price-' + i, d.price);
+    var rt = document.getElementById('rate-' + i);
+    if (rt && d.rating) {
+      rt.textContent = '\u2605' + d.rating + (d.rating_count ? ' (' + d.rating_count + ')' : '');
+    }
+    var mood = document.getElementById('mood-' + i);
+    if (mood) {
+      if (d.mood) { mood.textContent = d.mood; mood.className = 'badge'; }
+      else { mood.style.display = 'none'; }  // \uD6C4\uAE30 \uC5C6\uC74C \uB4F1 \uBB34\uC758\uBBF8\uD55C \uBC30\uC9C0\uB294 \uD45C\uC2DC\uD558\uC9C0 \uC54A\uC74C
+    }
+    var rv = document.getElementById('reviews-' + i);
+    if (rv && d.reviews && d.reviews.length) {
+      rv.innerHTML = d.reviews.map(function (r) { return '<p>' + esc(r) + '</p>'; }).join('');
+      rv.style.display = '';
+    }
+  });
+}
+
+function setText(id, text) {
+  var el = document.getElementById(id);
+  if (el) { el.textContent = text; el.classList.remove('skeleton'); }
+}
+
+function fmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(1) + 'km' : m + 'm'; }
+
+function esc(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// \u2500\u2500 \uC9C0\uB3C4 \uBCF4\uAE30 \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+var mapOpen = false, theMap = null, mapMarkers = [], theInfo = null;
+
+function toggleMap() {
+  mapOpen = !mapOpen;
+  document.getElementById('mapwrap').style.display = mapOpen ? 'block' : 'none';
+  document.getElementById('mapbtn').textContent = mapOpen ? '\uC9C0\uB3C4 \uB2EB\uAE30' : '\uC9C0\uB3C4\uB85C \uBCF4\uAE30';
+  if (mapOpen) renderMap();
+}
+
+function renderMap() {
+  if (!mapOpen || !lastPlaces.length) return;
+  if (typeof kakao === 'undefined' || !kakao.maps || !kakao.maps.load) {
+    document.getElementById('allmap').innerHTML =
+      '<div style="padding:40px;text-align:center;color:#889">\uC9C0\uB3C4\uB97C \uBD88\uB7EC\uC624\uC9C0 \uBABB\uD588\uC2B5\uB2C8\uB2E4.<br>KAKAO_JS_KEY \uC2DC\uD06C\uB9BF\uACFC \uCE74\uCE74\uC624 \uAC1C\uBC1C\uC790 \uCF58\uC194\uC758 \uC0AC\uC774\uD2B8 \uB3C4\uBA54\uC778 \uB4F1\uB85D\uC744 \uD655\uC778\uD574 \uC8FC\uC138\uC694.</div>';
+    return;
+  }
+  kakao.maps.load(function () {
+    var i;
+    if (!theMap) {
+      theMap = new kakao.maps.Map(document.getElementById('allmap'), {
+        center: new kakao.maps.LatLng(lastPlaces[0].lat, lastPlaces[0].lng), level: 5
+      });
+      theMap.addControl(new kakao.maps.ZoomControl(), kakao.maps.ControlPosition.RIGHT);
+      theInfo = new kakao.maps.InfoWindow({ removable: true });
+    }
+    for (i = 0; i < mapMarkers.length; i++) mapMarkers[i].setMap(null);
+    mapMarkers = [];
+    theInfo.close();
+    var bounds = new kakao.maps.LatLngBounds();
+    for (i = 0; i < lastPlaces.length; i++) {
+      (function (p, idx) {
+        var pos = new kakao.maps.LatLng(p.lat, p.lng);
+        bounds.extend(pos);
+        var marker = new kakao.maps.Marker({ map: theMap, position: pos, title: (idx + 1) + '. ' + p.name });
+        kakao.maps.event.addListener(marker, 'click', function () {
+          theInfo.setContent('<div style="padding:6px 10px;font-size:.85em;max-width:220px"><b>'
+            + (idx + 1) + '. ' + esc(p.name) + '</b><br>' + esc(p.category)
+            + (p.rating ? ' \xB7 \u2605' + p.rating : '')
+            + '<br><a href="' + esc(p.url) + '" target="_blank">\uCE74\uCE74\uC624\uB9F5 \uC0C1\uC138</a></div>');
+          theInfo.open(theMap, marker);
+        });
+        mapMarkers.push(marker);
+      })(lastPlaces[i], i);
+    }
+    theMap.setBounds(bounds);
+    setTimeout(function () { theMap.relayout(); theMap.setBounds(bounds); }, 100);
+  });
+}
+
+boot();
+<\/script>
+</body>
+</html>
+`;
+
 // supabase/functions/api/index.ts
 var MEALS = [
   "all",
@@ -1324,6 +1863,15 @@ Deno.serve(async (req) => {
   const sub = "/" + url.pathname.split("/").slice(4).filter(Boolean).join("/");
   const \uD1A0\uD070 = req.headers.get("x-app-token");
   try {
+    if (sub === "/" || sub === "/index.html") {
+      return new Response(PAGE, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=60",
+          ...corsHeaders()
+        }
+      });
+    }
     if (sub === "/config") {
       return json({
         auth_required: \uC554\uD638\uD544\uC694(),

@@ -9,6 +9,10 @@
 //   GET  /diag         진단 (기존 /diag)
 //   GET  /sdk          카카오맵 JS SDK 프록시 (기존 SDK_PATH)
 //   GET  /config       프론트에 필요한 설정 (암호 필요 여부, JS 키 유무)
+//   GET  /             화면 HTML (파이썬판이 PAGE 를 서빙하던 것과 동일)
+//
+// 화면을 함수가 직접 서빙하므로 Storage 버킷 없이도 앱이 뜬다. 버킷에 올려도
+// 그대로 동작한다 — 프론트는 자기 오리진에서 API 주소를 계산한다.
 
 import { JS_KEY, KAKAO_KEY, TTL, requireKakaoKey } from "./env.ts";
 import { corsHeaders, fetchT, json, 안전하게 } from "./util.ts";
@@ -18,6 +22,7 @@ import { 맛집검색, type Place } from "./places.ts";
 import { 잡결과, 잡생성, 잡스텝, type 브리핑항목 } from "./briefing.ts";
 import { 공유ID추출, 저장링크들 } from "./naver.ts";
 import { 암호필요, 토큰발급, 토큰유효 } from "./auth.ts";
+import { PAGE } from "./page.ts";
 
 interface 검색조건 {
   q: string;
@@ -100,6 +105,18 @@ Deno.serve(async (req) => {
   const 토큰 = req.headers.get("x-app-token");
 
   try {
+    // 화면 HTML. 인증은 프론트가 /config 를 보고 로그인 창을 띄우는 방식이라
+    // 여기서는 막지 않는다 (파이썬판도 로그인 페이지는 누구에게나 보였다).
+    if (sub === "/" || sub === "/index.html") {
+      return new Response(PAGE, {
+        headers: {
+          "Content-Type": "text/html; charset=utf-8",
+          "Cache-Control": "public, max-age=60",
+          ...corsHeaders(),
+        },
+      });
+    }
+
     // 인증이 필요 없는 경로
     if (sub === "/config") {
       return json({ auth_required: 암호필요(), map: Boolean(JS_KEY), kakao: Boolean(KAKAO_KEY) });

@@ -19,6 +19,22 @@ command -v deno >/dev/null || {
   exit 1
 }
 
+# web/index.html 을 함수가 서빙할 수 있도록 page.ts 로 박아 넣는다.
+# (파이썬판이 PAGE 문자열을 품고 있던 것과 같은 방식 — Storage 버킷 없이도 앱이 뜬다)
+python3 - <<'PY'
+import json
+html = open("web/index.html", encoding="utf-8").read()
+open("supabase/functions/api/page.ts", "w", encoding="utf-8").write(
+    "// 자동 생성 파일 — 직접 고치지 마세요.\n"
+    "// 원본: web/index.html · 다시 만들기: ./scripts/bundle.sh\n"
+    "//\n"
+    "// 파이썬판이 PAGE 문자열을 서버에 품고 있던 것과 같은 방식이다. 프론트를\n"
+    "// Storage 버킷에 따로 올리지 않아도 되므로 배포 단계가 하나 줄어든다.\n"
+    "export const PAGE = " + json.dumps(html, ensure_ascii=False) + ";\n"
+)
+PY
+echo "생성됨: supabase/functions/api/page.ts"
+
 OUT=supabase/functions/api/bundled.ts
 
 {
