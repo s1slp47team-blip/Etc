@@ -1,0 +1,11 @@
+.env
+supabase/.env
+supabase/.branches/
+supabase/.temp/
+node_modules/
+__pycache__/
+*.pyc
+
+# 로컬 전용 설정 (파이썬판)
+proxy.txt
+내맛집링크.txt
