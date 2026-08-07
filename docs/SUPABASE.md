@@ -29,44 +29,97 @@ Gemini 요약을 한 요청에서 1~2분에 걸쳐 처리했는데, 그대로 �
 배정하므로 프론트가 워커 2개를 동시에 굴려도 같은 구간이 중복 처리되지 않습니다.
 부수 효과로 **결과가 도착하는 대로 화면에 채워져** 체감 속도는 원본보다 낫습니다.
 
-## 배포
+## 배포 — 처음부터 끝까지
 
-### 0. 준비
+Render는 더 이상 쓰지 않는다는 전제로, Supabase만으로 같은 기능이 나오게 하는 전체 절차입니다.
 
-- Supabase 프로젝트 생성 → 프로젝트 ref(`abcdefghijklmnop`)와 service_role 키를 확보
-- [Supabase CLI](https://supabase.com/docs/guides/local-development/cli/getting-started) 설치
+### 자주 쓰는 링크
 
-### 1. 시크릿 등록
+`<ref>` 자리에 내 프로젝트 ref를 넣으면 됩니다. `_`를 그대로 두면 Supabase가 프로젝트를
+고르라고 물어봅니다.
 
-Render 환경변수에 넣어두었던 값들을 그대로 옮깁니다.
+| 용도 | 링크 |
+|---|---|
+| 프로젝트 만들기 | https://supabase.com/dashboard/new |
+| 프로젝트 목록 · ref 확인 | https://supabase.com/dashboard/projects |
+| **시크릿(암호·API 키) 등록** | https://supabase.com/dashboard/project/_/settings/functions |
+| service_role 키 확인 | https://supabase.com/dashboard/project/_/settings/api |
+| SQL Editor | https://supabase.com/dashboard/project/_/sql |
+| Storage 버킷 | https://supabase.com/dashboard/project/_/storage/buckets |
+| 함수 로그 | https://supabase.com/dashboard/project/_/functions |
+| Supabase CLI 설치 | https://supabase.com/docs/guides/local-development/cli/getting-started |
+
+API 키를 다시 발급받아야 한다면:
+
+| 키 | 발급처 |
+|---|---|
+| `KAKAO_REST_API_KEY`, `KAKAO_JS_KEY` | https://developers.kakao.com/console/app |
+| `GEMINI_API_KEY` | https://aistudio.google.com/apikey |
+| `GROQ_API_KEY` | https://console.groq.com/keys |
+
+### 1단계 — 프로젝트 만들고 ref 확인
+
+https://supabase.com/dashboard/new 에서 프로젝트를 만듭니다. 리전은 `Northeast Asia (Seoul)`을
+고르는 게 카카오·네이버 API 응답이 가장 빠릅니다.
+
+만들고 나면 주소창이 이렇게 됩니다:
+
+```
+https://supabase.com/dashboard/project/abcdefghijklmnop
+                                       └──────┬───────┘
+                                          이게 ref
+```
+
+### 2단계 — 암호와 API 키 등록 (Render의 Environment 탭에 해당)
+
+https://supabase.com/dashboard/project/_/settings/functions 로 갑니다.
+(대시보드에서는 **Project Settings → Edge Functions → Secrets**)
+
+`Add new secret`을 눌러 아래를 하나씩 넣습니다. Render의 Environment 탭을 옆에 띄워놓고
+이름·값을 그대로 옮겨 적으면 됩니다.
+
+| 시크릿 이름 | 필수 | 설명 |
+|---|---|---|
+| `KAKAO_REST_API_KEY` | ✅ | 카카오 장소·블로그 검색 |
+| `APP_PASSWORD` | ✅ | 접속 암호. **미설정 시 앱이 공개됩니다** (아래 주의) |
+| `GEMINI_API_KEY` | | 없으면 카카오맵 메뉴판 기준으로만 표시 |
+| `GROQ_API_KEY` | | Gemini 한도 소진 시 폴백 |
+| `KAKAO_JS_KEY` | | 지도 보기. 없으면 지도 버튼 비활성 |
+| `MY_PLACE_LINKS` | | 네이버지도 공유 링크 (쉼표/공백 구분) |
+
+`APP_PASSWORD`는 Render에서 쓰던 값을 그대로 넣으면 됩니다. Render에서 안 쓰고 있었다면
+지금 아무 문자열이나 정해서 넣으세요 — 이 값이 접속 화면에서 물어보는 암호가 됩니다.
+
+`MY_PLACE_LINKS`는 이제 **환경변수만** 동작합니다. 파이썬판처럼 `내맛집링크.txt` 파일을
+쓰고 계셨다면, Edge Function에는 파일 시스템이 없으므로 파일 안의 링크들을 쉼표로 이어
+붙여 이 시크릿에 넣으세요.
+
+CLI가 편하면 한 줄로도 됩니다. 값은 **반드시 작은따옴표로** 감싸세요 (`$`·`!`·공백이
+셸에 먹힙니다):
 
 ```bash
-supabase secrets set \
-  KAKAO_REST_API_KEY='카카오 REST 키' \
-  GEMINI_API_KEY='제미나이 키' \
-  --project-ref "$SUPABASE_PROJECT_REF"
+export SUPABASE_PROJECT_REF=abcdefghijklmnop
 
-# 선택 사항
 supabase secrets set \
-  GROQ_API_KEY='...' \
-  KAKAO_JS_KEY='...' \
-  APP_PASSWORD='접속 암호' \
+  KAKAO_REST_API_KEY='카카오REST키' \
+  APP_PASSWORD='접속암호' \
+  GEMINI_API_KEY='제미나이키' \
+  GROQ_API_KEY='그록키' \
+  KAKAO_JS_KEY='카카오JS키' \
   MY_PLACE_LINKS='https://naver.me/xxxx,https://naver.me/yyyy' \
   --project-ref "$SUPABASE_PROJECT_REF"
 ```
 
-| 시크릿 | 필수 | 설명 |
-|---|---|---|
-| `KAKAO_REST_API_KEY` | ✅ | 카카오 장소·블로그 검색 |
-| `GEMINI_API_KEY` | | 없으면 카카오맵 메뉴판 기준으로만 표시 |
-| `GROQ_API_KEY` | | Gemini 한도 소진 시 폴백 |
-| `KAKAO_JS_KEY` | | 지도 보기. 없으면 지도 버튼 비활성 |
-| `APP_PASSWORD` | | 설정 시 접속 암호 요구. 미설정이면 누구나 접속 |
-| `MY_PLACE_LINKS` | | 네이버지도 공유 링크 (쉼표/공백 구분) |
+**등록하면 안 되는 것**
 
-`SUPABASE_URL`과 `SUPABASE_SERVICE_ROLE_KEY`는 Edge Runtime이 자동 주입하므로 등록하지 않습니다.
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` — Edge Runtime이 자동 주입합니다.
+  직접 넣으면 거부됩니다.
+- `PORT` — Render가 주입하던 값입니다. Supabase에는 포트 개념이 없습니다.
+- `PYTHON_VERSION` 등 빌드 변수 — 파이썬 런타임 자체가 없습니다.
 
-### 2. 배포
+### 3단계 — 배포
+
+service_role 키를 https://supabase.com/dashboard/project/_/settings/api 에서 복사한 뒤:
 
 ```bash
 export SUPABASE_PROJECT_REF=abcdefghijklmnop
@@ -76,17 +129,49 @@ export SUPABASE_SERVICE_ROLE_KEY=eyJ...
 
 스크립트가 마이그레이션 적용 → 함수 배포 → `web/index.html` 업로드까지 합니다.
 
-접속 주소:
+### 4단계 — 카카오 개발자 콘솔에 도메인 등록 (지도를 쓸 때만)
+
+https://developers.kakao.com/console/app → 내 애플리케이션 → **플랫폼 → Web → 사이트 도메인**
+
+Render 도메인을 지우고 아래를 추가합니다:
 
 ```
-https://<ref>.supabase.co/storage/v1/object/public/app/index.html
+https://abcdefghijklmnop.supabase.co
 ```
 
-### 3. 카카오 개발자 콘솔 (지도를 쓸 때만)
-
-카카오 JS SDK는 등록된 도메인에서만 동작합니다. Render 도메인 대신
-`https://<ref>.supabase.co`를 **내 애플리케이션 > 플랫폼 > Web 사이트 도메인**에 추가하세요.
 이걸 안 하면 카드 목록은 정상인데 "지도로 보기"만 실패합니다.
+
+### 5단계 — 접속
+
+```
+https://abcdefghijklmnop.supabase.co/storage/v1/object/public/app/index.html
+```
+
+이 주소가 Render URL을 대체합니다. 북마크해 두세요.
+
+### 6단계 — 잘 들어갔는지 확인
+
+```
+https://abcdefghijklmnop.supabase.co/functions/v1/api/config
+```
+
+```json
+{"auth_required":true,"map":true,"kakao":true}
+```
+
+- `kakao: false` → `KAKAO_REST_API_KEY` 누락
+- `map: false` → `KAKAO_JS_KEY` 누락
+- `auth_required: false` → **`APP_PASSWORD` 누락 (앱이 공개 상태)**
+
+내 저장 맛집은 `/functions/v1/api/diag`에서 링크 인식 여부까지 볼 수 있습니다.
+
+### 시크릿을 바꾼 뒤에는
+
+이미 떠 있는 인스턴스가 옛 값을 들고 있을 수 있습니다. 한 번 다시 배포하면 즉시 정리됩니다.
+
+```bash
+supabase functions deploy api --project-ref "$SUPABASE_PROJECT_REF"
+```
 
 ## 운영
 
