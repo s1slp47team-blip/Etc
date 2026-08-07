@@ -185,6 +185,60 @@ $env:SUPABASE_SERVICE_ROLE_KEY = "eyJ..."
 중간에 멈췄다면 **거기까지만 반영된 것**이므로, 원인을 고친 뒤 스크립트를 처음부터
 다시 돌리면 됩니다 (여러 번 돌려도 안전합니다).
 
+### CLI 없이 배포하기
+
+CLI 설치가 부담되면 셋 다 웹 대시보드에서 처리할 수 있습니다. 터미널을 전혀 쓰지 않습니다.
+
+#### ① DB 테이블 — SQL Editor
+
+https://supabase.com/dashboard/project/_/sql
+
+`supabase/migrations/20260807000000_init.sql` **파일의 내용**을 복사해 붙여넣고 `Run`.
+(파일 경로가 아니라 파일 안의 SQL 전문입니다.)
+
+GitHub에서 바로 복사:
+https://raw.githubusercontent.com/s1slp47team-blip/Etc/claude/restaurant-briefing-supabase-migration-jpfp91/supabase/migrations/20260807000000_init.sql
+
+`Success. No rows returned` 이 나오면 성공입니다. 여러 번 돌려도 안전합니다.
+
+확인:
+
+```sql
+select table_name from information_schema.tables
+where table_schema = 'public' order by table_name;
+```
+
+`briefing_items`, `briefing_jobs`, `kv_cache`, `my_places`, `my_places_sync` 5개가 나와야 합니다.
+
+#### ② Edge Function — 대시보드 함수 편집기
+
+함수는 원래 9개 파일로 나뉘어 있어 편집기에 그대로 넣기 어렵습니다. 이를 위해
+**한 파일로 합친 `supabase/functions/api/bundled.ts`** 를 리포지토리에 넣어두었습니다
+(53KB, 1400여 줄). `supabase-js` 는 외부 참조로 남겨 Edge Runtime 이 알아서 받습니다.
+
+1. https://supabase.com/dashboard/project/_/functions → `Create a new function`
+2. 이름을 정확히 **`api`** 로 지정 (다른 이름이면 프론트가 못 찾습니다)
+3. 편집기 내용을 전부 지우고 `bundled.ts` 전문을 붙여넣기
+   — https://raw.githubusercontent.com/s1slp47team-blip/Etc/claude/restaurant-briefing-supabase-migration-jpfp91/supabase/functions/api/bundled.ts
+4. **JWT 검증(Verify JWT) 끄기** — 프론트가 `APP_PASSWORD` 로 자체 인증합니다.
+   켜두면 모든 요청이 401 이 됩니다. 편집기에 옵션이 없으면 배포 후
+   함수 상세 화면의 Settings 에서 끄면 됩니다.
+5. `Deploy`
+
+`bundled.ts` 는 자동 생성 파일입니다. 원본 9개 파일을 고쳤다면 `./scripts/bundle.sh`
+로 다시 만들어야 합니다 (deno 필요). CLI 로 배포한다면 이 파일은 쓰이지 않습니다.
+
+#### ③ 프론트 — Storage
+
+https://supabase.com/dashboard/project/_/storage/buckets
+
+1. `New bucket` → 이름 **`app`** → **Public bucket 켜기** → 저장
+2. 만들어진 버킷에 `web/index.html` 업로드
+   — https://raw.githubusercontent.com/s1slp47team-blip/Etc/claude/restaurant-briefing-supabase-migration-jpfp91/web/index.html
+     를 `index.html` 로 저장한 뒤 올리면 됩니다. 파일 이름이 정확히 `index.html` 이어야 합니다.
+
+셋 다 끝나면 5단계 접속 주소로 들어가면 됩니다.
+
 #### 마이그레이션만 따로 하기 (DB 비밀번호가 막힐 때)
 
 `supabase link`가 계속 실패하면 마이그레이션만 대시보드에서 처리할 수 있습니다.
