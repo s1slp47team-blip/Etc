@@ -893,8 +893,9 @@ GEMINI_CHUNK = 10  # 가게 10곳씩 나눠 병렬 요약 — 호출 횟수(무�
 요약예산초 = 70
 
 
-def _groq요약(prompt: str) -> list:
-    """Gemini 한도 소진 시 Groq(무료, llama-3.3-70b)로 같은 요약을 수행한다."""
+def _groq요약(prompt: str, 제한초: float = 60) -> list:
+    """Gemini 한도 소진 시 Groq(무료, llama-3.3-70b)로 같은 요약을 수행한다.
+    제한초: 남은 시간 예산. 고정 타임아웃을 쓰면 폴백 한 번이 예산을 넘길 수 있다."""
     resp = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {GROQ_KEY}"},
@@ -903,7 +904,7 @@ def _groq요약(prompt: str) -> list:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
         },
-        timeout=60,
+        timeout=min(60.0, 제한초),
     )
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"]
@@ -964,8 +965,9 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
             raise
     if resp is not None:
         items = json.loads(resp.text)
-    elif GROQ_KEY and 남은시간() > 0:  # Gemini 실패(한도·오류) → Groq 무료 폴백
-        items = _groq요약(prompt)
+    # 남은 예산이 너무 적으면 폴백을 시작하지 않는다 — 어차피 중간에 잘린다
+    elif GROQ_KEY and 남은시간() > 10:  # Gemini 실패(한도·오류) → Groq 무료 폴백
+        items = _groq요약(prompt, 남은시간())
     else:
         raise RuntimeError("Gemini 요약 실패 — 요청 한도 또는 시간 예산 초과")
     return {
