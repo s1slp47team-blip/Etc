@@ -5,7 +5,7 @@ r"""
 
 동네 이름을 입력하면:
 1. 카카오 주소/키워드 검색으로 동네 좌표를 구하고
-2. 반경 2km(500m~3km 조절) 이내 음식점을 카카오 키워드 검색으로 10~100곳(선택) 선별
+2. 반경 1km(500m~3km 조절) 이내 음식점을 카카오 키워드 검색으로 10~100곳(선택) 선별
    - 카카오 검색은 질의당 45건 제한 → 복수 검색어 병합으로 최대 100곳 확보
    - 시간대 선택: 점심(식사 위주, 술집·안주 전문 제외) / 저녁(술 동반 가능 업종 + 술집 검색 병합)
 3. 가게별 카카오맵 상세(메뉴판·가격, 대표 사진, 별점) + 카카오(다음) 블로그 후기 수집
@@ -1045,9 +1045,9 @@ PAGE = r"""<!doctype html>
   </select>
   <select id="radius">
     <option value="500">500m</option>
-    <option value="1000">1km</option>
+    <option value="1000" selected>1km</option>
     <option value="1500">1.5km</option>
-    <option value="2000" selected>2km</option>
+    <option value="2000">2km</option>
     <option value="3000">3km</option>
   </select>
   <select id="cnt" title="추출 개수">
@@ -1381,7 +1381,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == "/search":
             qs = urllib.parse.parse_qs(parsed.query)
             q = qs.get("q", [""])[0].strip()
-            radius = min(max(int(qs.get("radius", ["2000"])[0]), 100), 3000)
+            radius = min(max(int(qs.get("radius", ["1000"])[0]), 100), 3000)
             meal = qs.get("meal", ["all"])[0]
             if meal not in ("all", "lunch", "dinner", "cafe"):
                 meal = "all"
@@ -1428,7 +1428,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             req = json.loads(body)
             q = req["query"].strip()
-            radius = min(max(int(req.get("radius", 2000)), 100), 3000)
+            radius = min(max(int(req.get("radius", 1000)), 100), 3000)
             meal = req.get("meal", "all")
             if meal not in ("all", "lunch", "dinner", "cafe"):
                 meal = "all"
