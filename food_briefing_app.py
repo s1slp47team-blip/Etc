@@ -886,9 +886,16 @@ GEMINI_PROMPT = """다음은 "{동네}" 인근 음식점 목록이다. 가게마
 
 GEMINI_CHUNK = 10  # 가게 10곳씩 나눠 병렬 요약 — 호출 횟수(무료 한도 소모)와 응답 속도의 절충
 
+# 요약 단계의 총 시간 예산(초). 429(무료 한도) 재시도 대기가 쌓이면 /enrich 응답이
+# 몇 분씩 지연되고, 그 사이 호스팅 프록시가 연결을 끊어 클라이언트는 502를,
+# 서버는 BrokenPipeError를 본다. 예산을 넘기면 요약을 포기하고 카카오맵 메뉴판
+# 기준 결과라도 돌려준다 — 사진·메뉴·가격은 Gemini 없이도 채워지기 때문이다.
+요약예산초 = 70
 
-def _groq요약(prompt: str) -> list:
-    """Gemini 한도 소진 시 Groq(무료, llama-3.3-70b)로 같은 요약을 수행한다."""
+
+def _groq요약(prompt: str, 제한초: float = 60) -> list:
+    """Gemini 한도 소진 시 Groq(무료, llama-3.3-70b)로 같은 요약을 수행한다.
+    제한초: 남은 시간 예산. 고정 타임아웃을 쓰면 폴백 한 번이 예산을 넘길 수 있다."""
     resp = requests.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {GROQ_KEY}"},
@@ -897,7 +904,7 @@ def _groq요약(prompt: str) -> list:
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.3,
         },
-        timeout=60,
+        timeout=min(60.0, 제한초),
     )
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"]
@@ -907,7 +914,8 @@ def _groq요약(prompt: str) -> list:
     return json.loads(m.group(0))
 
 
-def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], start: int) -> dict[int, dict]:
+def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], start: int,
+                      마감: float | None = None) -> dict[int, dict]:
     블록 = []
     for i, (p, 자료) in enumerate(zip(places, 자료들)):
         메뉴줄 = ", ".join(
@@ -918,9 +926,13 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
         블록.append(f"[{i}] {p['name']} ({p['category']})\n  메뉴판: {메뉴줄}\n{후기}")
     prompt = GEMINI_PROMPT.format(동네=동네, 마지막=len(places) - 1, 가게목록="\n\n".join(블록))
     resp = None
+    남은시간 = (lambda: float("inf") if 마감 is None else 마감 - time.monotonic())
     # Groq 폴백이 있으면 Gemini 재시도를 줄여 빨리 넘어간다
     최대시도 = 2 if GROQ_KEY else 4
     for 시도 in range(최대시도):
+        if 남은시간() <= 0:  # 예산 소진 — 남은 재시도를 포기하고 폴백/생략으로 넘어간다
+            print(f"Gemini 요약 시간 예산 초과 — 구간 {start} 생략")
+            break
         try:
             resp = gemini_client.models.generate_content(
                 model=GEMINI_MODEL,
@@ -935,12 +947,16 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
         except Exception as e:
             # 일시 오류는 재시도. 대기가 총 2분을 넘으면 유휴 연결이 끊기므로 짧게 유지한다.
             msg = str(e)
+            # 대기는 남은 예산을 넘지 않는다 — 예산이 없으면 즉시 다음 판단으로 넘어간다
+            def 대기(초: float):
+                time.sleep(max(0.0, min(초, 남은시간())))
+
             if "429" in msg or "RESOURCE_EXHAUSTED" in msg:  # 무료 티어 호출 한도
                 if 시도 < 최대시도 - 1:
-                    time.sleep(25)
+                    대기(25)
                 continue
             if "503" in msg or "UNAVAILABLE" in msg:  # 일시적 수요 폭주
-                time.sleep(8 * (시도 + 1))
+                대기(8 * (시도 + 1))
                 continue
             # 그 외 오류(모델 정책 변경, 잘못된 인자 등)도 Groq으로 폴백해 요약이 끊기지 않게 한다
             if GROQ_KEY:
@@ -949,10 +965,11 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
             raise
     if resp is not None:
         items = json.loads(resp.text)
-    elif GROQ_KEY:  # Gemini 실패(한도·오류) → Groq 무료 폴백
-        items = _groq요약(prompt)
+    # 남은 예산이 너무 적으면 폴백을 시작하지 않는다 — 어차피 중간에 잘린다
+    elif GROQ_KEY and 남은시간() > 10:  # Gemini 실패(한도·오류) → Groq 무료 폴백
+        items = _groq요약(prompt, 남은시간())
     else:
-        raise RuntimeError("Gemini 요청 한도(429) 재시도 실패")
+        raise RuntimeError("Gemini 요약 실패 — 요청 한도 또는 시간 예산 초과")
     return {
         start + int(it["index"]): it
         for it in items
@@ -960,14 +977,16 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
     }
 
 
-def gemini요약(동네: str, places: list[dict], 자료들: list[dict]) -> dict[int, dict]:
+def gemini요약(동네: str, places: list[dict], 자료들: list[dict],
+              마감: float | None = None) -> dict[int, dict]:
     if not gemini_client:
         return {}
     결과: dict[int, dict] = {}
     구간들 = list(range(0, len(places), GEMINI_CHUNK))
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(구간들), 1)) as pool:
         futures = [
-            pool.submit(_gemini_chunk요약, 동네, places[s : s + GEMINI_CHUNK], 자료들[s : s + GEMINI_CHUNK], s)
+            pool.submit(_gemini_chunk요약, 동네, places[s : s + GEMINI_CHUNK],
+                        자료들[s : s + GEMINI_CHUNK], s, 마감)
             for s in 구간들
         ]
         for f in futures:
@@ -980,11 +999,14 @@ def gemini요약(동네: str, places: list[dict], 자료들: list[dict]) -> dict
 
 def 브리핑생성(동네: str, places: list[dict]) -> tuple[list[dict], bool]:
     """가게 목록에 사진·메뉴·가격대·반응을 붙여 완성한다.
-    반환: (완성 목록, Gemini 요약 성공 여부 — 실패분은 캐시하지 않도록)"""
+    반환: (완성 목록, Gemini 요약 성공 여부 — 실패분은 캐시하지 않도록)
+
+    자료 수집이 늦어진 만큼 요약에 쓸 시간이 줄도록, 예산은 호출 시점부터 잰다."""
+    마감 = time.monotonic() + 요약예산초
     # 카카오 검색 API 초당 제한 대응 — 10개 동시 수집 + 429 재시도(백오프)
     with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
         자료들 = list(pool.map(lambda p: 가게자료수집(동네, p), places))
-    요약 = gemini요약(동네, places, 자료들)
+    요약 = gemini요약(동네, places, 자료들, 마감)
     # 대부분(80% 이상) 요약됐을 때만 성공으로 보고 캐시한다 — 한도 초과로
     # 통째로/절반쯤 빈 결과가 캐시에 박제되는 것을 막는다
     요약성공 = (not gemini_client) or len(요약) >= len(places) * 0.8
@@ -1260,7 +1282,8 @@ function doSearch() {
       if (err2) { status.textContent = '오류: ' + err2.message; return; }
       if (detail.error) { status.textContent = detail.error; return; }
       fillDetail(detail.items);
-      status.textContent = data.center + ' · ' + data.places.length + '곳 분석 완료';
+      status.textContent = data.center + ' · ' + data.places.length + '곳 '
+        + (detail.partial ? '표시 (블로그 요약 생략 — 메뉴판 기준)' : '분석 완료');
     });
   });
 }
@@ -1428,11 +1451,16 @@ PAGE = (PAGE.replace("__SDKPATH__", SDK_PATH).replace("__JSKEY__", JS_KEY or "")
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def _send(self, data: bytes, ctype: str, status: int = 200):
-        self.send_response(status)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
+        # 브라우저가 먼저 떠났거나 프록시가 대기를 포기하면 쓰기가 실패한다.
+        # 이미 끊긴 연결이라 복구할 것이 없으므로 로그만 한 줄 남기고 넘어간다.
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            print(f"응답 전송 중 연결 끊김(무시): {self.path}")
 
     def _send_json(self, obj):
         self._send(json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
@@ -1560,7 +1588,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if 요약성공:  # Gemini가 통째로 실패한 결과는 캐시하지 않는다 (재검색 시 재시도)
                 with 캐시잠금:
                     상세캐시[key] = items
-            self._send_json({"items": items})
+            self._send_json({"items": items, "partial": not 요약성공})
         except Exception as e:
             self._send_json({"error": str(e)})
 
