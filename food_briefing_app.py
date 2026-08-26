@@ -977,23 +977,65 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
     }
 
 
+# 요약 결과는 '가게' 단위로 캐시한다. 검색 조건(동네·반경·시간대·업종…) 단위로
+# 캐시하면 조건을 하나만 바꿔도 겹치는 가게까지 전부 다시 요약해 무료 한도를
+# 빠르게 태운다. 가게 단위로 두면 조건을 바꿔가며 검색해도 새 가게만 호출한다.
+# 요약 내용은 가게에 대한 것이라 다른 동네 검색에서 나와도 그대로 쓸 수 있다.
+# (프로세스 메모리라 재배포·재시작 시 비워진다 — 영구 보관은 별도 저장소가 필요)
+요약캐시: dict[str, dict] = {}
+요약캐시잠금 = threading.Lock()
+요약캐시상한 = 3000
+
+
+def _가게키(p: dict) -> str:
+    """카카오 place_url은 가게마다 고유하다. 없으면 상호+주소로 대신한다."""
+    return p.get("url") or f'{p.get("name", "")}|{p.get("address", "")}'
+
+
+def _구간요약(동네: str, places: list[dict], 자료들: list[dict],
+            인덱스들: list[int], 마감: float | None) -> dict[int, dict]:
+    """캐시에 없는 가게만 골라 한 구간으로 요약하고, 원래 인덱스로 되돌린다."""
+    부분 = _gemini_chunk요약(
+        동네, [places[i] for i in 인덱스들], [자료들[i] for i in 인덱스들], 0, 마감
+    )
+    return {인덱스들[j]: v for j, v in 부분.items() if 0 <= j < len(인덱스들)}
+
+
 def gemini요약(동네: str, places: list[dict], 자료들: list[dict],
               마감: float | None = None) -> dict[int, dict]:
     if not gemini_client:
         return {}
     결과: dict[int, dict] = {}
-    구간들 = list(range(0, len(places), GEMINI_CHUNK))
+    미요약: list[int] = []
+    with 요약캐시잠금:
+        for i, p in enumerate(places):
+            캐시된 = 요약캐시.get(_가게키(p))
+            if 캐시된 is None:
+                미요약.append(i)
+            else:
+                결과[i] = 캐시된
+    print(f"요약 캐시 적중 {len(결과)}/{len(places)}곳 — {len(미요약)}곳만 새로 호출")
+    if not 미요약:
+        return 결과
+
+    구간들 = [미요약[s : s + GEMINI_CHUNK] for s in range(0, len(미요약), GEMINI_CHUNK)]
+    신규: dict[int, dict] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(len(구간들), 1)) as pool:
-        futures = [
-            pool.submit(_gemini_chunk요약, 동네, places[s : s + GEMINI_CHUNK],
-                        자료들[s : s + GEMINI_CHUNK], s, 마감)
-            for s in 구간들
-        ]
+        futures = [pool.submit(_구간요약, 동네, places, 자료들, 묶음, 마감) for 묶음 in 구간들]
         for f in futures:
             try:
-                결과.update(f.result())
+                신규.update(f.result())
             except Exception as e:
                 print(f"Gemini 요약 실패(일부 구간): {e}")
+    결과.update(신규)
+
+    with 요약캐시잠금:
+        for i, 항목 in 신규.items():
+            항목.pop("index", None)  # 구간 내 위치라 재사용 시 의미가 없다
+            요약캐시[_가게키(places[i])] = 항목
+        # 상한을 넘으면 오래 들어온 것부터 버린다 (dict은 삽입 순서를 유지)
+        for 키 in list(요약캐시)[: max(0, len(요약캐시) - 요약캐시상한)]:
+            del 요약캐시[키]
     return 결과
 
 
