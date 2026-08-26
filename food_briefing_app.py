@@ -1313,20 +1313,38 @@ function doSearch() {
     renderMap();  // 지도가 열려 있으면 새 결과로 갱신
     renderBase(data);
     if (data.cached_detail) {
-      fillDetail(data.cached_detail);
+      fillDetail(data.cached_detail, 0);
       status.textContent = data.center + ' · ' + data.places.length + '곳 (캐시)';
       searching = false;
       return;
     }
-    status.textContent = '블로그 후기 분석 중... (' + (data.places.length <= 30 ? '30~40초' : '1~2분') + ')';
-    ajax('POST', '/enrich', JSON.stringify({query: q, radius: radius, meal: meal, cuisine: cuisine, cnt: cnt, cert: cert, rate: rate, mine: mine}), function (err2, detail) {
-      searching = false;
-      if (err2) { status.textContent = '오류: ' + err2.message; return; }
-      if (detail.error) { status.textContent = detail.error; return; }
-      fillDetail(detail.items);
-      status.textContent = data.center + ' · ' + data.places.length + '곳 '
-        + (detail.partial ? '표시 (블로그 요약 생략 — 메뉴판 기준)' : '분석 완료');
-    });
+    // 전부를 한 요청에 처리하면 응답이 길어져 호스팅 프록시가 연결을 끊는다(502).
+    // 서버가 알려주는 next 위치를 따라 구간을 이어서 요청해 요청 하나를 짧게 유지한다.
+    var total = data.places.length;
+    var body = {query: q, radius: radius, meal: meal, cuisine: cuisine,
+                cnt: cnt, cert: cert, rate: rate, mine: mine};
+    var anyPartial = false;
+    status.textContent = '블로그 후기 분석 중... (0/' + total + ')';
+
+    function fetchBatch(offset) {
+      body.offset = offset;
+      ajax('POST', '/enrich', JSON.stringify(body), function (err2, detail) {
+        if (err2) { searching = false; status.textContent = '오류: ' + err2.message; return; }
+        if (detail.error) { searching = false; status.textContent = detail.error; return; }
+        fillDetail(detail.items, detail.offset);
+        if (detail.partial) anyPartial = true;
+        if (detail.next === null || detail.next === undefined) {  // 마지막 구간
+          searching = false;
+          status.textContent = data.center + ' · ' + total + '곳 '
+            + (anyPartial ? '표시 (일부 블로그 요약 생략 — 메뉴판 기준)' : '분석 완료');
+          return;
+        }
+        status.textContent = '블로그 후기 분석 중... ('
+          + (detail.offset + detail.items.length) + '/' + total + ')';
+        fetchBatch(detail.next);
+      });
+    }
+    fetchBatch(0);
   });
 }
 
@@ -1375,8 +1393,9 @@ function renderBase(data) {
   }).join('');
 }
 
-function fillDetail(items) {
-  items.forEach(function (d, i) {
+function fillDetail(items, offset) {
+  items.forEach(function (d, n) {
+    var i = (offset || 0) + n;  // 구간 단위로 오므로 카드 번호는 전체 목록 기준으로 환산
     var photo = document.getElementById('photo-' + i);
     if (photo) {
       if (d.photo) {
@@ -1487,8 +1506,26 @@ PAGE = (PAGE.replace("__SDKPATH__", SDK_PATH).replace("__JSKEY__", JS_KEY or "")
 # 캐시 키는 결과를 바꾸는 모든 조건을 담는다 — 하나라도 빠지면 조건을 바꿔도
 # 이전 결과가 그대로 돌아온다. (q, radius, meal, cnt, cert, rate, mine, cuisine)
 검색캐시: dict[tuple, dict] = {}  # 조건 → {"center","places"}
-상세캐시: dict[tuple, list] = {}  # 조건 → enriched items
+상세캐시: dict[tuple, list] = {}  # (조건, offset) → 그 구간의 enriched items
 캐시잠금 = threading.Lock()
+
+# 한 요청에 몇 곳까지 처리할지. 30~100곳을 한 번에 처리하면 응답이 수십 초~몇 분
+# 걸리고, 그 사이 호스팅 프록시가 유휴 연결을 끊어 502(BrokenPipeError)가 난다.
+# 구간을 나눠 요청 하나를 짧게 유지하면 이 문제가 구조적으로 사라지고,
+# 진행률 표시와 부분 실패 격리도 함께 얻는다.
+브리핑배치 = 10
+
+
+def _캐시된상세(key: tuple, 총개수: int) -> list | None:
+    """모든 구간이 캐시에 있을 때만 이어 붙여 돌려준다 (일부만 있으면 None).
+    호출자가 캐시잠금을 쥔 상태여야 한다."""
+    모음: list = []
+    for off in range(0, 총개수, 브리핑배치):
+        구간 = 상세캐시.get(key + (off,))
+        if 구간 is None:
+            return None
+        모음.extend(구간)
+    return 모음 or None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -1616,21 +1653,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             mine = req.get("mine", "prefer")
             if mine not in ("prefer", "only", "off"):
                 mine = "prefer"
+            offset = max(0, int(req.get("offset", 0)))
             key = (q, radius, meal, cnt, cert, rate, mine, cuisine)
             with 캐시잠금:
-                cached = 상세캐시.get(key)
                 base = 검색캐시.get(key)
-            if cached:
-                self._send_json({"items": cached})
-                return
+                cached = 상세캐시.get(key + (offset,))
             if not base:
                 self._send_json({"error": "먼저 검색을 실행하세요."})
                 return
-            items, 요약성공 = 브리핑생성(q, base["places"])
-            if 요약성공:  # Gemini가 통째로 실패한 결과는 캐시하지 않는다 (재검색 시 재시도)
+            총개수 = len(base["places"])
+            끝 = offset + 브리핑배치
+            # next는 다음 구간의 시작 위치. 마지막 구간이면 None을 보내 클라이언트가 멈춘다
+            응답 = {"offset": offset, "total": 총개수, "next": 끝 if 끝 < 총개수 else None}
+            if cached is not None:
+                self._send_json({**응답, "items": cached, "partial": False})
+                return
+            items, 요약성공 = 브리핑생성(q, base["places"][offset:끝])
+            if 요약성공:  # Gemini가 통째로 실패한 구간은 캐시하지 않는다 (재검색 시 재시도)
                 with 캐시잠금:
-                    상세캐시[key] = items
-            self._send_json({"items": items, "partial": not 요약성공})
+                    상세캐시[key + (offset,)] = items
+            self._send_json({**응답, "items": items, "partial": not 요약성공})
         except Exception as e:
             self._send_json({"error": str(e)})
 
@@ -1644,7 +1686,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         key = (q, radius, meal, cnt, cert, rate, mine, cuisine)
         with 캐시잠금:
             cached = 검색캐시.get(key)
-            detail = 상세캐시.get(key)
+            detail = _캐시된상세(key, len(cached["places"])) if cached else None
         if cached:
             return {**cached, "cached_detail": detail}
         좌표 = 동네좌표(q)
