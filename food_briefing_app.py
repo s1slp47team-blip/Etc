@@ -5,7 +5,7 @@ r"""
 
 동네 이름을 입력하면:
 1. 카카오 주소/키워드 검색으로 동네 좌표를 구하고
-2. 반경 2km(500m~3km 조절) 이내 음식점을 카카오 키워드 검색으로 10~100곳(선택) 선별
+2. 반경 1km(500m~3km 조절) 이내 음식점을 카카오 키워드 검색으로 10~100곳(선택) 선별
    - 카카오 검색은 질의당 45건 제한 → 복수 검색어 병합으로 최대 100곳 확보
    - 시간대 선택: 점심(식사 위주, 술집·안주 전문 제외) / 저녁(술 동반 가능 업종 + 술집 검색 병합)
 3. 가게별 카카오맵 상세(메뉴판·가격, 대표 사진, 별점) + 카카오(다음) 블로그 후기 수집
@@ -238,6 +238,10 @@ def _장소수집(query: str, x: float, y: float, radius: int, 최대: int = 45,
     "곱창", "막창", "닭발", "삼겹살", "회", "참치", "양꼬치", "족발", "보쌈",
 )
 
+# 업종을 직접 고른 경우에도 점심 검색에서는 빼야 할 '술집 계열'.
+# (업종 우선 규칙이 시간대 필터를 건너뛰더라도, 점심의 '식사 목적'만은 지킨다)
+술집계열_카테고리 = ("술집", "호프", "요리주점", "포장마차", "민속주점", "와인", "칵테일", "오뎅바")
+
 
 def _카테고리매칭(doc: dict, 키워드들: tuple) -> bool:
     cat = doc.get("category_name") or ""
@@ -286,6 +290,76 @@ def _시간대적합(d: dict, 시간대: str) -> bool:
 }
 # 카페 모드는 카카오 카페 그룹(CE7)을 먼저 훑고, 부족하면 음식점 그룹(제과·베이커리)에서 보충
 검색그룹코드 = {"cafe": ("CE7", "FD6")}
+
+
+# ── 1.5 업종(요리 종류) 필터 ────────────────────────────────────
+# 시간대(점심/저녁/카페)와는 별개의 축이다. 검색어로 넓게 건지고 카테고리로 걸러낸다 —
+# 검색어만 쓰면 무관한 업종이 섞이고, 카테고리만 쓰면 카카오가 세부 분류를 비워 둔
+# 가게를 놓치기 때문에 둘을 겹쳐 쓴다.
+# '고기'·'해산물,회'는 한식·일식에 걸쳐 있어("일식 > 회", "한식 > 해물,생선") 국가별
+# 분류와 겹친다. 겹침은 그대로 둔다 — 한식을 고르면 고깃집도 나오는 게 자연스럽다.
+업종정의 = {
+    "korean":   {"이름": "한식",
+                 "검색어": ("한식", "백반", "국밥", "찌개", "한정식", "가정식"),
+                 "포함": ("한식",)},
+    "chinese":  {"이름": "중식",
+                 "검색어": ("중식", "중국집", "짜장면", "짬뽕", "탕수육", "마라탕"),
+                 "포함": ("중식",)},
+    "japanese": {"이름": "일식",
+                 "검색어": ("일식", "초밥", "돈까스", "라멘", "우동", "이자카야"),
+                 "포함": ("일식",)},
+    "western":  {"이름": "양식",
+                 "검색어": ("양식", "파스타", "스테이크", "피자", "이탈리안", "브런치"),
+                 "포함": ("양식",)},
+    "meat":     {"이름": "고기",
+                 "검색어": ("고깃집", "삼겹살", "소고기", "갈비", "곱창", "족발"),
+                 "포함": ("육류,고기", "정육", "곱창", "막창", "족발", "보쌈", "양꼬치")},
+    "seafood":  {"이름": "해산물·회",
+                 "검색어": ("횟집", "해산물", "조개구이", "대게", "물회", "생선구이"),
+                 "포함": ("회", "해물", "생선", "조개", "게,대게", "참치", "장어",
+                        "아구", "복어", "매운탕")},
+    "chicken":  {"이름": "치킨",
+                 "검색어": ("치킨", "닭갈비", "찜닭", "닭한마리", "닭발"),
+                 "포함": ("치킨", "닭")},
+    "asian":    {"이름": "아시안",
+                 "검색어": ("쌀국수", "베트남", "태국", "인도", "아시안", "마라"),
+                 "포함": ("아시아", "베트남", "태국", "인도", "중동")},
+    "snack":    {"이름": "분식",
+                 "검색어": ("분식", "떡볶이", "김밥", "순대", "튀김", "라면"),
+                 "포함": ("분식",)},
+}
+업종키 = ("all",) + tuple(업종정의)
+
+
+def _업종적합(d: dict, 업종: str) -> bool:
+    정의 = 업종정의.get(업종)
+    return True if not 정의 else _카테고리매칭(d, 정의["포함"])
+
+
+def _적합(d: dict, 시간대: str, 업종: str = "all") -> bool:
+    """시간대 · 업종을 함께 본 최종 판정.
+
+    업종 우선 — 업종을 직접 고르면 시간대의 업종 화이트/블랙리스트는 건너뛴다.
+    저녁의 '술 어울림' 목록에는 중식·양식이 없고 점심 제외 목록에는 삼겹살·회가
+    있어, 그대로 AND로 걸면 '저녁 × 중식'·'점심 × 고기'가 0건이 되기 때문이다.
+    다만 점심의 '식사 목적'은 지켜야 하므로 술집 계열만은 계속 제외한다."""
+    if 업종 not in 업종정의:
+        return _시간대적합(d, 시간대)
+    if not _업종적합(d, 업종):
+        return False
+    if 시간대 == "cafe":
+        return _시간대적합(d, 시간대)
+    if 시간대 == "lunch":
+        return not _카테고리매칭(d, 술집계열_카테고리)
+    return True  # all · dinner — 업종 필터만으로 충분
+
+
+def _검색어목록(시간대: str, 업종: str) -> tuple:
+    """업종을 고르면 업종 검색어를 쓰고, 마지막에 '맛집'으로 한 번 더 훑는다.
+    ('맛집'은 인기 상위를 끌어오는 역할이고, 섞여 들어온 타 업종은 카테고리가 거른다)"""
+    if 업종 in 업종정의:
+        return 업종정의[업종]["검색어"] + ("맛집",)
+    return 검색어풀.get(시간대, 검색어풀["all"])
 
 
 # ── 1.7 내 저장 맛집 (네이버지도 공유 리스트) ───────────────────
@@ -485,17 +559,20 @@ def _인증배지찾기(place_name: str, 인증정보: dict[str, list[str]]) -> 
 def 맛집검색(
     x: float, y: float, radius: int, 시간대: str = "all", 개수: int = 맛집수,
     cert: str = "none", 평점4: bool = False, 내저장: str = "prefer",
+    업종: str = "all",
 ) -> list[dict]:
     """좌표 반경 내 맛집 검색.
     시간대: all/lunch(식사)/dinner(술 동반) · cert: none/any/michelin/blueribbon/century
-    평점4: 카카오맵 별점 4.0 이상만."""
+    업종: all + 업종정의 키(korean/chinese/…) · 평점4: 카카오맵 별점 4.0 이상만."""
     후보, seen = [], {}
     그룹코드들 = 검색그룹코드.get(시간대, ("FD6",))
+    if 시간대 == "cafe":
+        업종 = "all"  # 카페·디저트는 업종 축과 배타 — 카페 판정만 적용한다
 
     def 수집(질의: str, 배지: str = ""):
         for 코드 in 그룹코드들:
             for d in _장소수집(질의, x, y, radius, 그룹코드=코드):
-                if not _시간대적합(d, 시간대):
+                if not _적합(d, 시간대, 업종):
                     continue
                 if d["id"] in seen:
                     if 배지 and 배지 not in seen[d["id"]]["badges"]:
@@ -522,7 +599,7 @@ def 맛집검색(
             수집(질의, 인증표시명[cert])
     else:
         목표 = 개수 * 2 if 평점4 else 개수  # 평점 필터로 걸러질 몫을 여유 있게 수집
-        for 검색어 in 검색어풀.get(시간대, 검색어풀["all"]):
+        for 검색어 in _검색어목록(시간대, 업종):
             if len(후보) >= 목표:
                 break
             수집(검색어)
@@ -579,7 +656,7 @@ def 맛집검색(
                 결과들 = list(pool.map(개별검색, 누락))
             for s, docs in zip(누락, 결과들):
                 for d in docs:
-                    if d["id"] in seen or not _시간대적합(d, 시간대):
+                    if d["id"] in seen or not _적합(d, 시간대, 업종):
                         continue
                     if _대략거리m(float(d["y"]), float(d["x"]), s["lat"], s["lng"]) > 150:
                         continue
@@ -1037,17 +1114,20 @@ PAGE = r"""<!doctype html>
 <header>
   <h1>맛집 브리핑</h1>
   <input id="q" placeholder="동네 이름 (예: 역삼동, 서초동, 판교)" onkeydown="if(event.key==='Enter'||event.keyCode===13)doSearch()">
-  <select id="meal" title="시간대별 추천 기준">
+  <select id="meal" title="시간대별 추천 기준" onchange="syncCuisine()">
     <option value="all" selected>전체</option>
     <option value="lunch">점심 (식사 위주)</option>
     <option value="dinner">저녁 (술 한잔)</option>
     <option value="cafe">카페 · 디저트</option>
   </select>
+  <select id="cuisine" title="업종(요리 종류)별 검색 — 시간대와 함께 적용됩니다">
+    <option value="all" selected>업종 전체</option>__CUISINEOPTS__
+  </select>
   <select id="radius">
     <option value="500">500m</option>
-    <option value="1000">1km</option>
+    <option value="1000" selected>1km</option>
     <option value="1500">1.5km</option>
-    <option value="2000" selected>2km</option>
+    <option value="2000">2km</option>
     <option value="3000">3km</option>
   </select>
   <select id="cnt" title="추출 개수">
@@ -1096,6 +1176,10 @@ PAGE = r"""<!doctype html>
 · 저녁 — 술을 곁들이기 좋은 집 (고기·회·주점 등)
 · 카페·디저트 — 카페·베이커리·디저트 전문점 (룸카페 등 제외)
 
+업종(한식·중식·일식·양식·고기·해산물·회·치킨·아시안·분식)은 시간대와 함께
+걸 수 있습니다. 업종을 고르면 그 업종이 우선이라, "저녁 × 중식"처럼 시간대
+기준에 없는 조합도 결과가 나옵니다. (카페·디저트에서는 업종 선택이 꺼집니다)
+
 내 저장 맛집(네이버지도에 저장한 리스트)은 기본으로 맨 위에 ♥가본곳·♡가볼곳
 배지와 함께 표시됩니다. "내 저장만" 선택 시 저장한 곳만 볼 수 있습니다.
 
@@ -1125,11 +1209,20 @@ function ajax(method, url, body, cb) {
 
 var lastPlaces = [];  // 지도 표시용 — 마지막 검색 결과
 
+function syncCuisine() {
+  // 카페·디저트는 업종 축과 배타 — 선택을 초기화하고 잠근다
+  var sel = document.getElementById('cuisine');
+  sel.disabled = (document.getElementById('meal').value === 'cafe');
+  if (sel.disabled) sel.value = 'all';
+}
+syncCuisine();
+
 function doSearch() {
   if (searching) return;
   var q = document.getElementById('q').value.replace(/^\s+|\s+$/g, '');
   var radius = document.getElementById('radius').value;
   var meal = document.getElementById('meal').value;
+  var cuisine = document.getElementById('cuisine').value;
   var cnt = document.getElementById('cnt').value;
   var cert = document.getElementById('cert').value;
   var rate = document.getElementById('rate').value;
@@ -1141,6 +1234,7 @@ function doSearch() {
   status.textContent = (cert !== 'none' || rate === '4')
     ? '음식점 검색 + 인증·평점 확인 중... (10~30초)' : '주변 음식점 검색 중...';
   var qs = '/search?q=' + encodeURIComponent(q) + '&radius=' + radius + '&meal=' + meal
+         + '&cuisine=' + cuisine
          + '&cnt=' + cnt + '&cert=' + cert + '&rate=' + rate + '&mine=' + mine;
   ajax('GET', qs, null, function (err, data) {
     if (err) { status.textContent = '오류: ' + err.message; searching = false; return; }
@@ -1161,7 +1255,7 @@ function doSearch() {
       return;
     }
     status.textContent = '블로그 후기 분석 중... (' + (data.places.length <= 30 ? '30~40초' : '1~2분') + ')';
-    ajax('POST', '/enrich', JSON.stringify({query: q, radius: radius, meal: meal, cnt: cnt, cert: cert, rate: rate, mine: mine}), function (err2, detail) {
+    ajax('POST', '/enrich', JSON.stringify({query: q, radius: radius, meal: meal, cuisine: cuisine, cnt: cnt, cert: cert, rate: rate, mine: mine}), function (err2, detail) {
       searching = false;
       if (err2) { status.textContent = '오류: ' + err2.message; return; }
       if (detail.error) { status.textContent = detail.error; return; }
@@ -1317,12 +1411,18 @@ function renderMap() {
 </html>
 """
 
-PAGE = PAGE.replace("__SDKPATH__", SDK_PATH).replace("__JSKEY__", JS_KEY or "")
+업종옵션HTML = "".join(
+    f'\n    <option value="{키}">{정의["이름"]}</option>' for 키, 정의 in 업종정의.items()
+)
+PAGE = (PAGE.replace("__SDKPATH__", SDK_PATH).replace("__JSKEY__", JS_KEY or "")
+        .replace("__CUISINEOPTS__", 업종옵션HTML))
 
 
 # ── 5. HTTP 서버 ────────────────────────────────────────────────
-검색캐시: dict[tuple, dict] = {}  # (q, radius) → {"center","places"}
-상세캐시: dict[tuple, list] = {}  # (q, radius) → enriched items
+# 캐시 키는 결과를 바꾸는 모든 조건을 담는다 — 하나라도 빠지면 조건을 바꿔도
+# 이전 결과가 그대로 돌아온다. (q, radius, meal, cnt, cert, rate, mine, cuisine)
+검색캐시: dict[tuple, dict] = {}  # 조건 → {"center","places"}
+상세캐시: dict[tuple, list] = {}  # 조건 → enriched items
 캐시잠금 = threading.Lock()
 
 
@@ -1381,10 +1481,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif parsed.path == "/search":
             qs = urllib.parse.parse_qs(parsed.query)
             q = qs.get("q", [""])[0].strip()
-            radius = min(max(int(qs.get("radius", ["2000"])[0]), 100), 3000)
+            radius = min(max(int(qs.get("radius", ["1000"])[0]), 100), 3000)
             meal = qs.get("meal", ["all"])[0]
             if meal not in ("all", "lunch", "dinner", "cafe"):
                 meal = "all"
+            cuisine = qs.get("cuisine", ["all"])[0]
+            if cuisine not in 업종키 or meal == "cafe":
+                cuisine = "all"
             cnt = min(max(int(qs.get("cnt", ["30"])[0]), 10), 100)
             cert = qs.get("cert", ["none"])[0]
             if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
@@ -1394,7 +1497,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if mine not in ("prefer", "only", "off"):
                 mine = "prefer"
             try:
-                self._send_json(self._search(q, radius, meal, cnt, cert, rate, mine))
+                self._send_json(self._search(q, radius, meal, cnt, cert, rate, mine, cuisine))
             except Exception as e:
                 self._send_json({"error": str(e)})
         else:
@@ -1428,10 +1531,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             req = json.loads(body)
             q = req["query"].strip()
-            radius = min(max(int(req.get("radius", 2000)), 100), 3000)
+            radius = min(max(int(req.get("radius", 1000)), 100), 3000)
             meal = req.get("meal", "all")
             if meal not in ("all", "lunch", "dinner", "cafe"):
                 meal = "all"
+            cuisine = req.get("cuisine", "all")
+            if cuisine not in 업종키 or meal == "cafe":
+                cuisine = "all"
             cnt = min(max(int(req.get("cnt", 30)), 10), 100)
             cert = req.get("cert", "none")
             if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
@@ -1440,7 +1546,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             mine = req.get("mine", "prefer")
             if mine not in ("prefer", "only", "off"):
                 mine = "prefer"
-            key = (q, radius, meal, cnt, cert, rate, mine)
+            key = (q, radius, meal, cnt, cert, rate, mine, cuisine)
             with 캐시잠금:
                 cached = 상세캐시.get(key)
                 base = 검색캐시.get(key)
@@ -1461,10 +1567,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _search(
         self, q: str, radius: int, meal: str = "all", cnt: int = 30,
         cert: str = "none", rate: bool = False, mine: str = "prefer",
+        cuisine: str = "all",
     ) -> dict:
         if not q:
             return {"error": "동네 이름을 입력하세요."}
-        key = (q, radius, meal, cnt, cert, rate, mine)
+        key = (q, radius, meal, cnt, cert, rate, mine, cuisine)
         with 캐시잠금:
             cached = 검색캐시.get(key)
             detail = 상세캐시.get(key)
@@ -1474,7 +1581,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not 좌표:
             return {"error": f'"{q}" 위치를 찾지 못했습니다. 동네 이름을 다시 확인해 주세요.'}
         center, x, y = 좌표
-        places = 맛집검색(x, y, radius, meal, cnt, cert, rate, mine)
+        places = 맛집검색(x, y, radius, meal, cnt, cert, rate, mine, 업종=cuisine)
         result = {"center": center, "places": places}
         with 캐시잠금:
             검색캐시[key] = result
