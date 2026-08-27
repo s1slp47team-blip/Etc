@@ -509,37 +509,121 @@ def 내저장_매칭(place: dict, 저장목록: list[dict]) -> str:
 }
 인증표시명 = {"michelin": "미쉐린", "blueribbon": "블루리본", "century": "백년가게", "bwchef": "흑백요리사"}
 
-_인증맵캐시: dict[tuple, dict[str, list[str]]] = {}
+# 인증 맛집은 반경 안에 많아야 십수 곳이라 1페이지(15건)면 충분하다.
+# 기본값(45건)으로 두면 질의마다 3페이지를 넘겨 호출이 3배로 늘어난다.
+인증조회건수 = 15
+인증캐시TTL = 7 * 24 * 3600  # 인증 명부는 몇 달에 한 번 바뀌므로 1주일이면 넉넉하다
+인증캐시버전 = 1
+인증캐시최대 = 100  # 격자 항목 수 상한 — 항목당 약 15KB이므로 파일은 1.5MB 안쪽
+_인증캐시파일 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_인증캐시.json")
+# 캐시에 남길 필드만 추린다 — 카카오 응답 전체를 저장하면 파일이 불필요하게 커진다
+_인증보관필드 = (
+    "id", "place_name", "category_name", "category_group_code",
+    "address_name", "road_address_name", "phone", "place_url", "x", "y",
+)
+
+_인증맵캐시: dict[str, dict] = {}  # 격자키 → {"시각": epoch, "docs": {인증키: [장소,...]}}
 _인증맵잠금 = threading.Lock()
 
 
-def 인증맵(x: float, y: float, radius: int) -> dict[str, list[str]]:
-    """해당 반경의 인증 맛집을 미리 조회해 {정규화 상호: [배지들]}로 만든다.
-    인증 필터를 안 걸고 검색해도 인증 배지가 보이도록 하기 위한 것.
-    카카오 장소 ID는 같은 가게라도 검색 경로에 따라 다를 수 있어 상호로 대조한다.
-    좌표·반경 단위로 캐시해 반복 검색 시 추가 호출이 없다."""
-    키 = (round(x, 3), round(y, 3), radius)  # 약 100m 격자로 캐시 공유
-    with _인증맵잠금:
-        if 키 in _인증맵캐시:
-            return _인증맵캐시[키]
-    결과: dict[str, list[str]] = {}
+def _인증키(x: float, y: float, radius: int, 그룹코드들: tuple) -> str:
+    """약 100m 격자로 묶어 캐시를 공유한다 (JSON 키로 쓰려고 문자열)."""
+    return f"{round(x, 3)}:{round(y, 3)}:{radius}:{'+'.join(그룹코드들)}"
 
-    def 조사(항목):
-        c, 질의들 = 항목
-        찾음 = []
+
+def _인증캐시로드():
+    """지난 실행이 남긴 캐시를 읽는다. 클라우드는 유휴 시 프로세스가 죽으므로,
+    파일로 남겨두지 않으면 깨어날 때마다 인증 조회를 처음부터 다시 한다."""
+    try:
+        with open(_인증캐시파일, encoding="utf-8") as f:
+            데이터 = json.load(f)
+    except (OSError, ValueError):
+        return
+    if 데이터.get("버전") != 인증캐시버전:
+        return  # 형식이 바뀌었으면 통째로 버린다
+    지금 = time.time()
+    for 키, 값 in (데이터.get("항목") or {}).items():
+        try:
+            if 지금 - float(값["시각"]) < 인증캐시TTL:
+                _인증맵캐시[키] = {"시각": float(값["시각"]), "docs": 값["docs"]}
+        except (KeyError, TypeError, ValueError):
+            continue
+
+
+def _인증캐시저장():
+    """읽기 전용 파일시스템 등 쓰기 실패는 무시한다 — 캐시는 없어도 동작한다."""
+    try:
+        with _인증맵잠금:
+            항목 = sorted(_인증맵캐시.items(), key=lambda kv: kv[1]["시각"], reverse=True)
+            스냅 = dict(항목[:인증캐시최대])
+        임시 = _인증캐시파일 + ".tmp"
+        with open(임시, "w", encoding="utf-8") as f:
+            json.dump({"버전": 인증캐시버전, "항목": 스냅}, f, ensure_ascii=False)
+        os.replace(임시, _인증캐시파일)  # 쓰다 만 파일이 남지 않도록 원자적 교체
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+_인증캐시로드()
+
+
+def 인증자료(x: float, y: float, radius: int,
+             그룹코드들: tuple = ("FD6",)) -> dict[str, list[dict]]:
+    """반경 내 인증 맛집을 인증 종류별 장소 목록으로 조회한다.
+
+    인증 배지 표시와 인증 필터가 함께 쓰는 단일 창구다. 예전에는 두 기능이
+    각자 같은 질의를 돌려 인증 필터를 켜면 호출이 정확히 2배가 됐다.
+    거리는 격자 중심이 아니라 실제 검색 좌표 기준으로 다시 계산해 돌려준다."""
+    키 = _인증키(x, y, radius, 그룹코드들)
+    지금 = time.time()
+
+    def 내보내기(docs: dict[str, list[dict]]) -> dict[str, list[dict]]:
+        결과 = {}
+        for c, 목록 in docs.items():
+            나온 = []
+            for d in 목록:
+                복사 = dict(d)  # 캐시 원본이 호출부에서 변형되지 않도록
+                복사["distance"] = str(int(_대략거리m(y, x, float(d["y"]), float(d["x"]))))
+                나온.append(복사)
+            결과[c] = 나온
+        return 결과
+
+    with _인증맵잠금:
+        항목 = _인증맵캐시.get(키)
+        if 항목 and 지금 - 항목["시각"] < 인증캐시TTL:
+            return 내보내기(항목["docs"])
+
+    def 조사(항목쌍):
+        c, 질의들 = 항목쌍
+        모음, 본id = [], set()
         for 질의 in 질의들:
-            for d in _장소수집(질의, x, y, radius):
-                찾음.append(d["place_name"])
-        return 인증표시명[c], 찾음
+            for 코드 in 그룹코드들:
+                for d in _장소수집(질의, x, y, radius, 최대=인증조회건수, 그룹코드=코드):
+                    if d["id"] in 본id:
+                        continue
+                    본id.add(d["id"])
+                    모음.append({k: d.get(k) for k in _인증보관필드})
+        return c, 모음
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-        for 배지, 이름들 in pool.map(조사, 인증검색어.items()):
-            for 이름 in 이름들:
-                키이름 = _이름정규화(이름)
-                if 키이름 and 배지 not in 결과.setdefault(키이름, []):
-                    결과[키이름].append(배지)
+        docs = dict(pool.map(조사, 인증검색어.items()))
     with _인증맵잠금:
-        _인증맵캐시[키] = 결과
+        _인증맵캐시[키] = {"시각": 지금, "docs": docs}
+    _인증캐시저장()
+    return 내보내기(docs)
+
+
+def 인증맵(x: float, y: float, radius: int) -> dict[str, list[str]]:
+    """인증 맛집을 {정규화 상호: [배지들]}로 만든다.
+    인증 필터를 안 걸고 검색해도 인증 배지가 보이도록 하기 위한 것.
+    카카오 장소 ID는 같은 가게라도 검색 경로에 따라 다를 수 있어 상호로 대조한다."""
+    결과: dict[str, list[str]] = {}
+    for c, 목록 in 인증자료(x, y, radius).items():
+        배지 = 인증표시명[c]
+        for d in 목록:
+            키이름 = _이름정규화(d["place_name"])
+            if 키이름 and 배지 not in 결과.setdefault(키이름, []):
+                결과[키이름].append(배지)
     return 결과
 
 
@@ -569,34 +653,38 @@ def 맛집검색(
     if 시간대 == "cafe":
         업종 = "all"  # 카페·디저트는 업종 축과 배타 — 카페 판정만 적용한다
 
+    def 담기(d: dict, 배지: str = ""):
+        if not _적합(d, 시간대, 업종):
+            return
+        if d["id"] in seen:
+            if 배지 and 배지 not in seen[d["id"]]["badges"]:
+                seen[d["id"]]["badges"].append(배지)
+            return
+        d["badges"] = [배지] if 배지 else []
+        seen[d["id"]] = d
+        후보.append(d)
+
     def 수집(질의: str, 배지: str = ""):
         for 코드 in 그룹코드들:
             for d in _장소수집(질의, x, y, radius, 그룹코드=코드):
-                if not _적합(d, 시간대, 업종):
-                    continue
-                if d["id"] in seen:
-                    if 배지 and 배지 not in seen[d["id"]]["badges"]:
-                        seen[d["id"]]["badges"].append(배지)
-                    continue
-                d["badges"] = [배지] if 배지 else []
-                seen[d["id"]] = d
-                후보.append(d)
+                담기(d, 배지)
 
     if cert == "any":
         # 인증 종류별로 따로 모은 뒤 라운드로빈으로 섞는다 —
         # 한 인증(미쉐린)의 결과가 상위를 독식해 다른 인증이 밀려나지 않게
         import itertools
 
+        자료 = 인증자료(x, y, radius, 그룹코드들)
         풀들 = []
-        for c, 질의들 in 인증검색어.items():
+        for c in 인증검색어:
             시작 = len(후보)
-            for 질의 in 질의들:
-                수집(질의, 인증표시명[c])
+            for d in 자료.get(c) or []:
+                담기(d, 인증표시명[c])
             풀들.append(후보[시작:])
         후보 = [d for 묶음 in itertools.zip_longest(*풀들) for d in 묶음 if d is not None]
     elif cert in 인증검색어:
-        for 질의 in 인증검색어[cert]:
-            수집(질의, 인증표시명[cert])
+        for d in 인증자료(x, y, radius, 그룹코드들).get(cert) or []:
+            담기(d, 인증표시명[cert])
     else:
         목표 = 개수 * 2 if 평점4 else 개수  # 평점 필터로 걸러질 몫을 여유 있게 수집
         for 검색어 in _검색어목록(시간대, 업종):
