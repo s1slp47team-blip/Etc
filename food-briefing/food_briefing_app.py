@@ -28,8 +28,10 @@ r"""
 
 import concurrent.futures
 import http.server
+import itertools
 import json
 import os
+import random
 import re
 import socket
 import sys
@@ -682,8 +684,6 @@ def 맛집검색(
     if cert == "any":
         # 인증 종류별로 따로 모은 뒤 라운드로빈으로 섞는다 —
         # 한 인증(미쉐린)의 결과가 상위를 독식해 다른 인증이 밀려나지 않게
-        import itertools
-
         자료 = 인증자료(x, y, radius, 그룹코드들)
         풀들 = []
         for c in 인증검색어:
@@ -777,19 +777,20 @@ def 맛집검색(
         else:  # prefer — 저장 맛집을 앞으로 (그 안에서는 기존 정확도순 유지)
             후보 = [d for d in 후보 if d.get("_저장배지")] + [d for d in 후보 if not d.get("_저장배지")]
 
-    # 카카오맵 상세(평점·영업시간·예약)를 붙인다 — 결과 카드와 평점 필터에 사용.
-    # 평점 필터가 있으면 후보 전체를, 아니면 상위 개수만 조회 (조회 결과는 캐시됨)
+    # 카카오맵 상세(평점·영업시간·예약)는 비공식 API라 느리다. 평점으로 걸러야 할
+    # 때만 여기서 받고, 아니면 카드부터 먼저 그리고 /enrich 구간에서 채운다 —
+    # 예전에는 30곳 상세를 다 받은 뒤에야 카드가 떠서 그동안 빈 화면이었다.
     대상 = 후보 if 평점4 else 후보[:개수]
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-        상세들 = list(pool.map(lambda d: _카카오상세(d["place_url"]), 대상))
-    for d, 상세 in zip(대상, 상세들):
-        d["_상세"] = 상세
     if 평점4:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            상세들 = list(pool.map(lambda d: _카카오상세(d["place_url"]), 대상))
+        for d, 상세 in zip(대상, 상세들):
+            d["_상세"] = 상세
         대상 = [d for d in 대상 if (d["_상세"].get("rating") or 0) >= 4.0]
 
     places = []
     for d in 대상[:개수]:
-        상세 = d.get("_상세") or {}
+        상세 = d.get("_상세") or {}  # 평점 필터를 안 걸었으면 비어 있다
         places.append(
             {
                 "name": d["place_name"],
@@ -1017,9 +1018,33 @@ _홈캐시: dict[str, dict] = _캐시로드(_홈캐시파일, 홈캐시버전, �
 _홈캐시잠금 = threading.Lock()
 
 
+def _홈뽑기(전체: list[dict], 개수: int) -> list[dict]:
+    """첫 화면에 띄울 가게를 고른다.
+
+    폴더별로 묶어 번갈아 뽑는다 — 목록 앞에서 그냥 자르면 첫 폴더가 화면을
+    독식해 나머지 폴더는 영영 뜨지 않는다. 폴더 안에서는 매번 다시 섞어,
+    묻혀 있던 저장 맛집도 돌아가며 보이게 한다.
+
+    단, 이미 사진을 받아둔 가게를 앞세운다. 매번 처음 보는 가게만 뽑으면
+    화면을 열 때마다 카카오 조회가 붙어 첫 화면이 느려지기 때문이다.
+    (캐시가 차면 이 조건이 무의미해져 결국 전체에서 고르게 섞인다)"""
+    폴더별: dict[str, list] = {}
+    for s in 전체:
+        폴더별.setdefault(s["folder"], []).append(s)
+    with _홈캐시잠금:
+        받아둔 = set(_홈캐시)
+    for 목록 in 폴더별.values():
+        random.shuffle(목록)
+        목록.sort(key=lambda s: _이름정규화(s["name"]) not in 받아둔)  # 안정 정렬 → 섞인 순서 유지
+    순서 = []
+    for 묶음 in itertools.zip_longest(*폴더별.values()):
+        순서.extend(s for s in 묶음 if s is not None)
+    return 순서[:개수]
+
+
 def 내맛집홈() -> list[dict]:
     """첫 화면 카드 목록. 저장 리스트가 없으면 빈 목록을 돌려주고, 화면에서도 영역이 숨는다."""
-    저장 = 내맛집목록()[:홈표시수]
+    저장 = _홈뽑기(내맛집목록(), 홈표시수)
     if not 저장:
         return []
 
@@ -1078,6 +1103,9 @@ def 가게자료수집(동네: str, place: dict) -> dict:
         "menus": 상세.get("menus") or [],
         "rating": 상세.get("rating"),
         "rating_count": 상세.get("rating_count"),
+        "hours": 상세.get("hours") or "",
+        "open_status": 상세.get("open_status") or "",
+        "booking": bool(상세.get("booking")),
     }
 
 
@@ -1296,9 +1324,21 @@ def 브리핑생성(동네: str, places: list[dict]) -> tuple[list[dict], bool]:
                 "reviews": (s.get("reviews") or [])[:2],
                 "rating": 자료.get("rating"),
                 "rating_count": 자료.get("rating_count"),
+                # 검색 단계에서 상세를 건너뛰었으므로 영업시간·예약도 여기서 채운다
+                "hours": 자료.get("hours") or "",
+                "open_status": 자료.get("open_status") or "",
+                "booking": bool(자료.get("booking")),
+                "phone": p.get("phone") or "",
             }
         )
     return enriched, 요약성공
+
+
+# 한 요청에 몇 곳까지 처리할지. 30~100곳을 한 번에 처리하면 응답이 수십 초~몇 분
+# 걸리고, 그 사이 호스팅 프록시가 유휴 연결을 끊어 502(BrokenPipeError)가 난다.
+# 구간을 나눠 요청 하나를 짧게 유지하면 이 문제가 구조적으로 사라지고,
+# 진행률 표시와 부분 실패 격리도 함께 얻는다.
+브리핑배치 = 10
 
 
 # ── 4. 페이지 HTML ──────────────────────────────────────────────
@@ -1892,28 +1932,44 @@ function doSearch() {
     var total = data.places.length;
     var body = {query: q, radius: radius, meal: meal, cuisine: cuisine,
                 cnt: cnt, cert: cert, rate: rate, mine: mine};
-    var anyPartial = false;
+    // 구간을 두 개씩 겹쳐 보낸다. 카카오 상세는 서버에서 호출 간격이 조절되므로
+    // 한 구간이 기다리는 동안 다른 구간의 블로그·요약 작업이 진행돼 전체가 빨라진다.
+    var anyPartial = false, 채운수 = 0, 다음구간 = 0, 진행중 = 0, 끝남 = false;
+    var 배치크기 = __BATCH__, 동시구간 = 2;
     status.textContent = '블로그 후기 분석 중... (0/' + total + ')';
 
-    function fetchBatch(offset) {
-      body.offset = offset;
-      ajax('POST', '/enrich', JSON.stringify(body), function (err2, detail) {
-        if (err2) { searching = false; status.textContent = '오류: ' + err2.message; return; }
-        if (detail.error) { searching = false; status.textContent = detail.error; return; }
+    function 구간보내기(offset) {
+      진행중++;
+      var 몸통 = {}, k;
+      for (k in body) if (body.hasOwnProperty(k)) 몸통[k] = body[k];
+      몸통.offset = offset;
+      ajax('POST', '/enrich', JSON.stringify(몸통), function (err2, detail) {
+        진행중--;
+        if (끝남) return;
+        if (err2) { 끝남 = true; searching = false; status.textContent = '오류: ' + err2.message; return; }
+        if (detail.error) { 끝남 = true; searching = false; status.textContent = detail.error; return; }
         fillDetail(detail.items, detail.offset);
         if (detail.partial) anyPartial = true;
-        if (detail.next === null || detail.next === undefined) {  // 마지막 구간
+        채운수 += detail.items.length;
+        if (채운수 >= total) {
+          끝남 = true;
           searching = false;
           status.textContent = data.center + ' · ' + total + '곳 '
             + (anyPartial ? '표시 (일부 블로그 요약 생략 — 메뉴판 기준)' : '분석 완료');
           return;
         }
-        status.textContent = '블로그 후기 분석 중... ('
-          + (detail.offset + detail.items.length) + '/' + total + ')';
-        fetchBatch(detail.next);
+        status.textContent = '블로그 후기 분석 중... (' + 채운수 + '/' + total + ')';
+        구간채우기();
       });
     }
-    fetchBatch(0);
+
+    function 구간채우기() {
+      while (!끝남 && 진행중 < 동시구간 && 다음구간 < total) {
+        구간보내기(다음구간);
+        다음구간 += 배치크기;
+      }
+    }
+    구간채우기();
   });
 }
 
@@ -1928,9 +1984,6 @@ function renderBase(data) {
       return '<span class="cert ' + certClass(b) + '">' + esc(b) + '</span>';
     }).join('');
     var rating = p.rating ? '★' + p.rating + (p.rating_count ? ' (' + p.rating_count + ')' : '') : '';
-    var hours = p.hours ? esc(p.hours) + (p.open_status ? ' · ' + esc(p.open_status) : '') : '정보 없음';
-    var reserve = p.booking ? '카카오맵 예약 가능'
-                : (p.phone ? '전화 예약 문의 (' + esc(p.phone) + ')' : '매장 문의');
     return '<div class="card" id="card-' + i + '">'
     + '<div class="top">'
     +   '<div class="photo ' + phClass(p.name) + '" id="photo-' + i + '"></div>'
@@ -1943,8 +1996,8 @@ function renderBase(data) {
     +     '<table class="facts">'
     +       '<tr><td>주요 메뉴</td><td class="skeleton" id="menu-' + i + '">블로그 후기 분석 중...</td></tr>'
     +       '<tr><td>가격대</td><td class="skeleton" id="price-' + i + '">...</td></tr>'
-    +       '<tr><td>영업시간</td><td>' + hours + '</td></tr>'
-    +       '<tr><td>예약</td><td>' + reserve + '</td></tr>'
+    +       '<tr><td>영업시간</td><td class="skeleton" id="hours-' + i + '">확인 중...</td></tr>'
+    +       '<tr><td>예약</td><td class="skeleton" id="book-' + i + '">확인 중...</td></tr>'
     +       '<tr><td>주소</td><td>' + esc(p.address) + (p.phone ? ' · ' + esc(p.phone) : '') + '</td></tr>'
     +     '</table>'
     +   '</div>'
@@ -1969,6 +2022,9 @@ function fillDetail(items, offset) {
     }
     setText('menu-' + i, d.menu);
     setText('price-' + i, d.price);
+    setText('hours-' + i, d.hours ? d.hours + (d.open_status ? ' · ' + d.open_status : '') : '정보 없음');
+    setText('book-' + i, d.booking ? '카카오맵 예약 가능'
+            : (d.phone ? '전화 예약 문의 (' + d.phone + ')' : '매장 문의'));
     var rt = document.getElementById('rate-' + i);
     if (rt && d.rating) {
       rt.textContent = '★' + d.rating + (d.rating_count ? ' (' + d.rating_count + ')' : '');
@@ -2063,7 +2119,7 @@ document.getElementById('q').focus();
     f'\n    <option value="{키}">{정의["이름"]}</option>' for 키, 정의 in 업종정의.items()
 )
 PAGE = (PAGE.replace("__SDKPATH__", SDK_PATH).replace("__JSKEY__", JS_KEY or "")
-        .replace("__CUISINEOPTS__", 업종옵션HTML))
+        .replace("__CUISINEOPTS__", 업종옵션HTML).replace("__BATCH__", str(브리핑배치)))
 
 
 # ── 5. HTTP 서버 ────────────────────────────────────────────────
@@ -2072,13 +2128,6 @@ PAGE = (PAGE.replace("__SDKPATH__", SDK_PATH).replace("__JSKEY__", JS_KEY or "")
 검색캐시: dict[tuple, dict] = {}  # 조건 → {"center","places"}
 상세캐시: dict[tuple, list] = {}  # (조건, offset) → 그 구간의 enriched items
 캐시잠금 = threading.Lock()
-
-# 한 요청에 몇 곳까지 처리할지. 30~100곳을 한 번에 처리하면 응답이 수십 초~몇 분
-# 걸리고, 그 사이 호스팅 프록시가 유휴 연결을 끊어 502(BrokenPipeError)가 난다.
-# 구간을 나눠 요청 하나를 짧게 유지하면 이 문제가 구조적으로 사라지고,
-# 진행률 표시와 부분 실패 격리도 함께 얻는다.
-브리핑배치 = 10
-
 
 def _캐시된상세(key: tuple, 총개수: int) -> list | None:
     """모든 구간이 캐시에 있을 때만 이어 붙여 돌려준다 (일부만 있으면 None).
