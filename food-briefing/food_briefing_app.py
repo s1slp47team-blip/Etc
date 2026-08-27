@@ -54,7 +54,7 @@ PORT = int(os.environ.get("PORT", "8767"))
 # HOST: 클라우드 컨테이너에는 IPv6가 없는 경우가 많아, PaaS(PORT 지정) 환경에서는
 # IPv4(0.0.0.0)로 바인딩한다. 사내/로컬은 기존대로 IPv4+IPv6 듀얼스택("::")
 HOST = "0.0.0.0" if os.environ.get("PORT") else "::"
-맛집수 = 30  # 브리핑할 가게 수
+맛집수 = 20  # 브리핑할 가게 수 — 가게마다 상세·블로그 조회가 붙어 개수가 곧 대기 시간이다
 
 
 def _프록시적용():
@@ -1662,8 +1662,8 @@ PAGE = r"""<!doctype html>
         <label class="fld"><span class="k">추출 개수</span>
           <select id="cnt" onchange="updateFilterSummary()">
             <option value="10">10곳</option>
-            <option value="20">20곳</option>
-            <option value="30" selected>30곳</option>
+            <option value="20" selected>20곳</option>
+            <option value="30">30곳</option>
             <option value="40">40곳</option>
             <option value="50">50곳</option>
             <option value="60">60곳</option>
@@ -2213,7 +2213,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cuisine = qs.get("cuisine", ["all"])[0]
             if cuisine not in 업종키 or meal == "cafe":
                 cuisine = "all"
-            cnt = min(max(int(qs.get("cnt", ["30"])[0]), 10), 100)
+            cnt = min(max(int(qs.get("cnt", ["20"])[0]), 10), 100)
             cert = qs.get("cert", ["none"])[0]
             if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
                 cert = "none"
@@ -2263,7 +2263,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             cuisine = req.get("cuisine", "all")
             if cuisine not in 업종키 or meal == "cafe":
                 cuisine = "all"
-            cnt = min(max(int(req.get("cnt", 30)), 10), 100)
+            cnt = min(max(int(req.get("cnt", 20)), 10), 100)
             cert = req.get("cert", "none")
             if cert not in ("none", "any", "michelin", "blueribbon", "century", "bwchef"):
                 cert = "none"
