@@ -531,37 +531,47 @@ def _인증키(x: float, y: float, radius: int, 그룹코드들: tuple) -> str:
     return f"{round(x, 3)}:{round(y, 3)}:{radius}:{'+'.join(그룹코드들)}"
 
 
-def _인증캐시로드():
-    """지난 실행이 남긴 캐시를 읽는다. 클라우드는 유휴 시 프로세스가 죽으므로,
-    파일로 남겨두지 않으면 깨어날 때마다 인증 조회를 처음부터 다시 한다."""
+def _캐시로드(경로: str, 버전: int, 유효초: float) -> dict:
+    """지난 실행이 남긴 JSON 캐시를 읽는다. 클라우드는 유휴 시 프로세스가 죽으므로,
+    파일로 남겨두지 않으면 깨어날 때마다 외부 조회를 처음부터 다시 한다.
+    항목마다 "시각"(epoch)이 있어야 하며, 만료된 것은 버리고 돌려준다."""
     try:
-        with open(_인증캐시파일, encoding="utf-8") as f:
+        with open(경로, encoding="utf-8") as f:
             데이터 = json.load(f)
     except (OSError, ValueError):
-        return
-    if 데이터.get("버전") != 인증캐시버전:
-        return  # 형식이 바뀌었으면 통째로 버린다
-    지금 = time.time()
+        return {}
+    if 데이터.get("버전") != 버전:
+        return {}  # 형식이 바뀌었으면 통째로 버린다
+    지금, 살아있는 = time.time(), {}
     for 키, 값 in (데이터.get("항목") or {}).items():
         try:
-            if 지금 - float(값["시각"]) < 인증캐시TTL:
-                _인증맵캐시[키] = {"시각": float(값["시각"]), "docs": 값["docs"]}
+            if 지금 - float(값["시각"]) < 유효초:
+                살아있는[키] = 값
         except (KeyError, TypeError, ValueError):
             continue
+    return 살아있는
+
+
+def _캐시저장(경로: str, 버전: int, 항목: dict, 최대: int):
+    """읽기 전용 파일시스템 등 쓰기 실패는 무시한다 — 캐시는 없어도 동작한다."""
+    try:
+        최신 = sorted(항목.items(), key=lambda kv: kv[1]["시각"], reverse=True)
+        임시 = 경로 + ".tmp"
+        with open(임시, "w", encoding="utf-8") as f:
+            json.dump({"버전": 버전, "항목": dict(최신[:최대])}, f, ensure_ascii=False)
+        os.replace(임시, 경로)  # 쓰다 만 파일이 남지 않도록 원자적 교체
+    except (OSError, TypeError, ValueError):
+        pass
+
+
+def _인증캐시로드():
+    _인증맵캐시.update(_캐시로드(_인증캐시파일, 인증캐시버전, 인증캐시TTL))
 
 
 def _인증캐시저장():
-    """읽기 전용 파일시스템 등 쓰기 실패는 무시한다 — 캐시는 없어도 동작한다."""
-    try:
-        with _인증맵잠금:
-            항목 = sorted(_인증맵캐시.items(), key=lambda kv: kv[1]["시각"], reverse=True)
-            스냅 = dict(항목[:인증캐시최대])
-        임시 = _인증캐시파일 + ".tmp"
-        with open(임시, "w", encoding="utf-8") as f:
-            json.dump({"버전": 인증캐시버전, "항목": 스냅}, f, ensure_ascii=False)
-        os.replace(임시, _인증캐시파일)  # 쓰다 만 파일이 남지 않도록 원자적 교체
-    except (OSError, TypeError, ValueError):
-        pass
+    with _인증맵잠금:
+        스냅 = dict(_인증맵캐시)
+    _캐시저장(_인증캐시파일, 인증캐시버전, 스냅, 인증캐시최대)
 
 
 _인증캐시로드()
@@ -928,6 +938,63 @@ def _카카오사진(place_url: str):
     return "https:" + url if url.startswith("//") else url
 
 
+# ── 2.5 첫 화면용 내 저장 맛집 카드 ─────────────────────────────
+# 검색 전 화면이 비어 있지 않도록, 네이버지도에 저장해 둔 맛집을 사진과 함께 보여준다.
+# 가게별 사진·업종은 잘 바뀌지 않으므로 파일 캐시에 남겨, 프로세스가 재시작돼도
+# 첫 화면이 카카오 API 호출 없이 뜨게 한다.
+홈캐시TTL = 7 * 24 * 3600
+홈캐시버전 = 1
+홈캐시최대 = 300
+홈표시수 = 8  # 첫 화면에 띄울 카드 수
+_홈캐시파일 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_홈캐시.json")
+_홈캐시: dict[str, dict] = _캐시로드(_홈캐시파일, 홈캐시버전, 홈캐시TTL)
+_홈캐시잠금 = threading.Lock()
+
+
+def 내맛집홈() -> list[dict]:
+    """첫 화면 카드 목록. 저장 리스트가 없으면 빈 목록을 돌려주고, 화면에서도 영역이 숨는다."""
+    저장 = 내맛집목록()[:홈표시수]
+    if not 저장:
+        return []
+
+    def 채우기(s: dict) -> dict:
+        키 = _이름정규화(s["name"])
+        with _홈캐시잠금:
+            정보 = _홈캐시.get(키)
+        if not 정보:
+            정보 = {"시각": time.time(), "photo": "", "category": "", "url": "", "rating": None}
+            try:
+                for d in _장소수집(s["name"], s["lng"], s["lat"], 300, 최대=3):
+                    # 같은 이름의 다른 지점을 잡지 않도록 저장 좌표에서 200m 이내만
+                    if _대략거리m(float(d["y"]), float(d["x"]), s["lat"], s["lng"]) > 200:
+                        continue
+                    상세 = _카카오상세(d["place_url"])
+                    정보["url"] = d["place_url"]
+                    정보["category"] = (d["category_name"] or "").split(" > ")[-1]
+                    정보["photo"] = 상세.get("photo") or ""
+                    정보["rating"] = 상세.get("rating")
+                    break
+            except Exception as e:  # 첫 화면은 실패해도 검색을 막지 않는다
+                print(f"첫 화면 저장 맛집 조회 실패(무시): {e}")
+            with _홈캐시잠금:
+                _홈캐시[키] = 정보
+        return {
+            "name": s["name"],
+            "badge": _저장배지(s["folder"]),
+            "category": 정보.get("category") or "",
+            "photo": 정보.get("photo") or "",
+            "url": 정보.get("url") or "",
+            "rating": 정보.get("rating"),
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+        카드들 = list(pool.map(채우기, 저장))
+    with _홈캐시잠금:
+        스냅 = dict(_홈캐시)
+    _캐시저장(_홈캐시파일, 홈캐시버전, 스냅, 홈캐시최대)
+    return 카드들
+
+
 def 가게자료수집(동네: str, place: dict) -> dict:
     """가게 1곳의 카카오맵 상세(메뉴판·사진·별점)와 카카오 블로그 후기를 모은다."""
     상호 = place["name"]
@@ -1177,42 +1244,135 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>맛집 브리핑</title>
 <style>
+  /* 색: 따뜻한 종이색 바탕 + 고추장 계열 강조색.
+     구형 브라우저(IE 모드)에서도 동작해야 하므로 CSS 변수와 position:sticky는 쓰지 않는다.
+       종이 #f7f4ef · 카드 #ffffff · 연한면 #f1ece4 · 글자 #191411 · 보조글자 #4a423c
+       흐린글자 #8b8078 · 선 #e4ded5 · 진한선 #d3cabe · 강조 #d2371a · 강조연함 #fbeae4 */
   * { box-sizing: border-box; }
-  body { font-family: 'Malgun Gothic', sans-serif; margin: 0; background: #f4f6f9; }
-  header { padding: 12px 20px; background: #1d2a3a;
-           background-image: linear-gradient(120deg, #141e30, #2c3e50);
-           border-bottom: 2px solid #c9a227;
-           display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
-           position: sticky; top: 0; z-index: 10; }
-  header h1 { color: #fff; font-size: 1.05em; margin: 0 12px 0 0; white-space: nowrap; }
-  header input { flex: 1; max-width: 380px; padding: 9px 12px; font-size: 1em; border: 0; border-radius: 6px; }
-  header select { padding: 9px 8px; font-size: .95em; border: 0; border-radius: 6px; }
-  header button { padding: 9px 18px; font-size: 1em; border: 0; border-radius: 6px;
-                  background: #c9a227; color: #16222e; font-weight: bold; cursor: pointer; }
-  header button:hover { background: #dbb948; }
-  #status { color: #b9c6d8; font-size: .85em; margin-left: 8px; }
+  body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; margin: 0;
+         background: #f7f4ef; color: #191411; }
+  button { font-family: inherit; }
+
+  /* ── 브랜드 바 ─────────────────────────────────────────── */
+  .brandbar { display: flex; align-items: center; justify-content: space-between;
+              padding: 13px 26px; background: #fff; border-bottom: 1px solid #e4ded5; }
+  .logo { display: flex; align-items: center; gap: 9px; }
+  .logo svg { width: 22px; height: 22px; flex-shrink: 0; }
+  .logo b { font-size: 1.02em; letter-spacing: -.01em; white-space: nowrap; }
+  .brandnav { display: flex; gap: 8px; }
+  .linkbtn { background: none; border: 1px solid #e4ded5; border-radius: 8px; padding: 7px 13px;
+             font-size: .82em; color: #4a423c; cursor: pointer; }
+  .linkbtn:hover { border-color: #d3cabe; background: #f7f4ef; }
+
+  /* ── 히어로 검색 ───────────────────────────────────────── */
+  .hero { position: relative; overflow: hidden; padding: 46px 26px 32px; text-align: center;
+          background: #fff; border-bottom: 1px solid #e4ded5; }
+  /* 음식 사진의 색감만 옮겨온 배경. 흐리게 번지게 해 각진 색블록으로 보이지 않게 한다.
+     filter를 모르는 구형 브라우저에서는 옅은 색 띠로 남는다 — 읽는 데 지장 없음. */
+  .hero-strip { position: absolute; top: -30px; left: -30px; right: -30px; bottom: -30px;
+                display: flex; opacity: .16; pointer-events: none;
+                filter: blur(38px); -webkit-filter: blur(38px); }
+  .hero-strip div { flex: 1; }
+  .hero-inner { position: relative; }
+  .hero h2 { font-size: 1.72em; margin: 0 0 6px; letter-spacing: -.015em; font-weight: bold; }
+  .hero .sub { font-size: .86em; color: #8b8078; margin: 0 0 24px; }
+
+  .searchbar { display: flex; gap: 8px; max-width: 560px; margin: 0 auto; }
+  .searchfield { flex: 1; display: flex; align-items: center; gap: 10px; background: #fff;
+                 border: 1.5px solid #191411; border-radius: 10px; padding: 0 14px;
+                 box-shadow: 0 1px 2px rgba(25,20,17,.05), 0 8px 24px rgba(25,20,17,.06); }
+  .searchfield svg { flex-shrink: 0; opacity: .5; }
+  .searchfield input { flex: 1; border: 0; outline: none; padding: 13px 0; font-size: 1em;
+                       background: none; color: #191411; min-width: 0; }
+  .btn-go { background: #d2371a; color: #fff; border: 0; border-radius: 10px; padding: 13px 26px;
+            font-size: 1em; font-weight: bold; cursor: pointer; white-space: nowrap; }
+  .btn-go:hover { background: #b82f14; }
+
+  .segment { display: inline-flex; gap: 4px; margin: 20px auto 0; padding: 4px;
+             background: #f1ece4; border-radius: 10px; max-width: 100%; }
+  .seg { padding: 8px 16px; border: 0; background: none; border-radius: 7px; font-size: .88em;
+         color: #4a423c; cursor: pointer; white-space: nowrap; }
+  .seg.on { background: #fff; color: #191411; font-weight: bold;
+            box-shadow: 0 1px 2px rgba(25,20,17,.08); }
+
+  .chiprow { display: flex; gap: 8px; justify-content: center; align-items: center;
+             margin-top: 18px; flex-wrap: wrap; }
+  .chiplbl { font-size: .78em; color: #8b8078; }
+  .chip { border: 1px solid #d3cabe; border-radius: 99px; padding: 6px 14px; font-size: .84em;
+          color: #4a423c; background: #fff; cursor: pointer; }
+  .chip:hover { border-color: #191411; }
+  .chip.more { border-style: dashed; color: #8b8078; }
+  .chip.more.on { border-style: solid; border-color: #d2371a; color: #d2371a; }
+
+  #status { color: #8b8078; font-size: .84em; margin-top: 14px; min-height: 1.2em; }
+
+  /* ── 상세 필터 (PC: 펼침 패널 / 모바일: 바텀시트) ───────── */
+  #sheetdim { display: none; }
+  #filters { display: none; max-width: 640px; margin: 16px auto 0; background: #fff;
+             border: 1px solid #e4ded5; border-radius: 12px; padding: 18px 20px; text-align: left;
+             box-shadow: 0 2px 6px rgba(25,20,17,.08), 0 24px 60px rgba(25,20,17,.10); }
+  #filters.open { display: block; }
+  .fgrid { display: flex; flex-wrap: wrap; gap: 12px; }
+  .fld { flex: 1 1 30%; min-width: 150px; }
+  .fld .k { display: block; font-size: .76em; color: #8b8078; margin-bottom: 5px; }
+  .fld select { width: 100%; padding: 9px 8px; border: 1px solid #d3cabe; border-radius: 8px;
+                background: #fff; font-size: .9em; color: #191411; }
+  .fld select:disabled { background: #f1ece4; color: #8b8078; }
+  .grab, .sheet-title, .sheet-done { display: none; }
+
+  /* ── 첫 화면: 내 저장 맛집 + 안내 ──────────────────────── */
+  #home { max-width: 1200px; margin: 0 auto; padding: 30px 20px 40px; }
+  .strip-head { display: flex; align-items: baseline; justify-content: space-between;
+                margin-bottom: 14px; }
+  .strip-head h3 { margin: 0; font-size: 1.04em; }
+  .strip-head h3 span { color: #8b8078; font-weight: normal; font-size: .84em; margin-left: 6px; }
+  .mine-cards { display: flex; flex-wrap: wrap; gap: 14px; }
+  .fcard { width: calc(25% - 11px); background: #fff; border: 1px solid #e4ded5;
+           border-radius: 12px; overflow: hidden; text-decoration: none; color: inherit;
+           box-shadow: 0 1px 2px rgba(25,20,17,.05); display: block; }
+  .fcard:hover { border-color: #d3cabe; }
+  /* 배경색을 두지 않는다 — 아래 .ph0~.ph5 색 타일이 덮이지 않도록 (선택자 우선순위) */
+  .fcard .fph { height: 104px; position: relative; overflow: hidden; }
+  .fcard .fph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .fcard .fbody { padding: 10px 12px 12px; }
+  .fcard .fnm { font-size: .9em; font-weight: bold; line-height: 1.35; }
+  .fcard .fdt { font-size: .78em; color: #8b8078; margin-top: 3px; }
+  .mine-skel { color: #b5aca3; font-size: .88em; padding: 8px 2px; }
+
+  .how { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 34px; }
+  .how-item { flex: 1 1 240px; border-left: 2px solid #d2371a; padding-left: 14px; }
+  .how-item b { display: block; font-size: .92em; }
+  .how-item span { display: block; font-size: .84em; color: #8b8078; margin-top: 3px;
+                   line-height: 1.6; }
+  #helpbox { display: none; margin-top: 26px; background: #fff; border: 1px solid #e4ded5;
+             border-radius: 12px; padding: 20px 24px; color: #4a423c; font-size: .88em;
+             line-height: 1.85; white-space: pre-line; }
+  #helpbox.open { display: block; }
+
+  /* ── 결과 카드 (구조는 기존 그대로) ─────────────────────── */
   #results { max-width: 1200px; margin: 0 auto; padding: 16px 20px 40px;
              display: flex; flex-wrap: wrap; justify-content: space-between;
              align-items: flex-start; }
-  .notice { color: #777; font-size: .9em; padding: 24px 4px; white-space: pre-wrap; width: 100%; }
-  .card { background: #fff; border: 1px solid #e3e6ea; border-radius: 12px; padding: 16px 20px;
+  .notice { color: #8b8078; font-size: .9em; padding: 24px 4px; white-space: pre-wrap; width: 100%; }
+  .card { background: #fff; border: 1px solid #e4ded5; border-radius: 12px; padding: 16px 20px;
           margin-bottom: 12px; width: calc(50% - 6px); }
   @media (max-width: 920px) { .card { width: 100%; } }
   .top { display: flex; gap: 16px; }
-  .photo { width: 104px; height: 104px; border-radius: 8px; background: #e8eef7; flex-shrink: 0;
-           display: flex; align-items: center; justify-content: center; color: #8aa4c8;
+  .photo { width: 104px; height: 104px; border-radius: 8px; background: #f1ece4; flex-shrink: 0;
+           display: flex; align-items: center; justify-content: center; color: #a8998a;
            font-size: .78em; overflow: hidden; }
   .photo img { width: 100%; height: 100%; object-fit: cover; }
   .info { flex: 1; min-width: 0; }
-  .name { font-size: 1.05em; font-weight: bold; color: #0a4da3; text-decoration: none; }
-  .name:hover { text-decoration: underline; }
-  .meta { color: #888; font-size: .84em; margin-left: 8px; }
-  .rate { color: #e59a13; font-size: .88em; font-weight: bold; margin-left: 8px; white-space: nowrap; }
+  .name { font-size: 1.05em; font-weight: bold; color: #191411; text-decoration: none; }
+  .name:hover { color: #d2371a; text-decoration: underline; }
+  .meta { color: #8b8078; font-size: .84em; margin-left: 8px; }
+  .rate { color: #b8791a; font-size: .88em; font-weight: bold; margin-left: 8px; white-space: nowrap; }
   .badge { display: inline-block; font-size: .8em; padding: 2px 10px; border-radius: 10px;
-           background: #e1f5ee; color: #085041; margin-left: 8px; vertical-align: 1px; }
-  .badge.wait { background: #f0f2f5; color: #666; }
+           background: #fbeae4; color: #a02c11; margin-left: 8px; vertical-align: 1px; }
+  .badge.wait { background: #f1ece4; color: #8b8078; }
   .cert { display: inline-block; font-size: .76em; font-weight: bold; padding: 2px 9px;
           border-radius: 9px; margin-left: 6px; vertical-align: 1px; }
+  /* 인증 배지 색은 이미 의미가 붙어 있어 그대로 둔다 */
   .cert.c-mi { background: #7d0f0f; color: #fff; }
   .cert.c-bl { background: #123c8a; color: #fff; }
   .cert.c-hu { background: #6a4b16; color: #fff; }
@@ -1220,41 +1380,100 @@ PAGE = r"""<!doctype html>
   .cert.c-my { background: #d63b5b; color: #fff; }   /* 가본곳 */
   .cert.c-my2 { background: #fdeaee; color: #b02a45; border: 1px solid #f3c2ce; }  /* 가볼곳 */
   .cert.c-cf { background: #6b4a2f; color: #fff; }   /* 저장한 카페 */
-  #mapbtn { background: #2c3e50; color: #fff; }
-  #mapbtn:hover { background: #3d5368; }
+
   #mapwrap { max-width: 1200px; margin: 14px auto 0; padding: 0 20px; display: none; }
-  #allmap { width: 100%; height: 460px; border: 1px solid #d8dee6; border-radius: 12px;
-            background: #eef1f5; }
-  .map-hint { color: #778; font-size: .82em; margin: 6px 2px 0; }
+  #allmap { width: 100%; height: 460px; border: 1px solid #e4ded5; border-radius: 12px;
+            background: #f1ece4; }
+  .map-hint { color: #8b8078; font-size: .82em; margin: 6px 2px 0; }
   table.facts { width: 100%; font-size: .9em; margin-top: 8px; border-collapse: collapse; }
   table.facts td { padding: 3px 0; vertical-align: top; }
-  table.facts td:first-child { color: #888; width: 76px; }
-  .skeleton { color: #b5bcc7; }
-  .reviews { border-top: 1px solid #eee; margin-top: 12px; padding-top: 10px;
-             font-size: .9em; color: #555; line-height: 1.6; }
+  table.facts td:first-child { color: #8b8078; width: 76px; }
+  .skeleton { color: #b5aca3; }
+  .reviews { border-top: 1px solid #f1ece4; margin-top: 12px; padding-top: 10px;
+             font-size: .9em; color: #4a423c; line-height: 1.6; }
   .reviews p { margin: 0 0 4px; }
-  .reviews p::before { content: '\201C'; color: #b0bdd0; margin-right: 2px; }
-  .reviews p::after { content: '\201D'; color: #b0bdd0; margin-left: 2px; }
+  .reviews p::before { content: '\201C'; color: #c3b6a6; margin-right: 2px; }
+  .reviews p::after { content: '\201D'; color: #c3b6a6; margin-left: 2px; }
 
-  /* ── 모바일 레이아웃 (폰에서 자동 적용, PC 화면은 영향 없음) ── */
+  /* 사진이 없는 가게의 자리 — 음식 색에서 가져온 여섯 가지 타일.
+     초록·분홍 같은 찬 색을 섞으면 음식 목록에서 튀어 보여, 전부 따뜻한 색으로 둔다. */
+  .ph0 { background: linear-gradient(150deg, #e8b04b, #c4622a); }  /* 구운 색 */
+  .ph1 { background: linear-gradient(150deg, #d9502f, #a32418); }  /* 고추장 */
+  .ph2 { background: linear-gradient(150deg, #f0dca8, #c9a15c); }  /* 누룽지 */
+  .ph3 { background: linear-gradient(150deg, #b09a55, #6f5c22); }  /* 된장 */
+  .ph4 { background: linear-gradient(150deg, #e5d2bc, #b08962); }  /* 라떼 */
+  .ph5 { background: linear-gradient(150deg, #b5462f, #6e1f13); }  /* 진한 양념 */
+
+  /* 모바일 하단 고정 버튼 — PC에서는 감춘다 */
+  #mobilecta { display: none; }
+
+  /* ── 모바일 ────────────────────────────────────────────── */
   @media (max-width: 640px) {
-    body { font-size: 17px; }
-    header { padding: 10px 12px; gap: 6px; position: static; }
-    header h1 { font-size: 1.15em; margin-right: 4px; }
-    header input { flex: 1 1 100%; max-width: none; font-size: 16px; padding: 12px; }
-    header select { flex: 1 1 30%; font-size: 15px; padding: 11px 6px; }
-    header button { flex: 1 1 45%; font-size: 16px; padding: 12px; }
-    #status { flex: 1 1 100%; margin-left: 0; font-size: .9em; }
-    #results { padding: 10px 10px 40px; }
+    body { font-size: 17px; padding-bottom: 78px; }
+    .brandbar { padding: 10px 12px; }
+    .logo b { font-size: .96em; }
+    .linkbtn { padding: 6px 10px; font-size: .76em; white-space: nowrap; }
+    .hero { padding: 24px 16px 20px; }
+    .hero h2 { font-size: 1.32em; }
+    .hero .sub { font-size: .8em; margin-bottom: 18px; }
+    .sub-long { display: none; }
+    .searchfield { padding: 0 13px; }
+    .searchfield input { font-size: 16px; padding: 12px 0; }  /* 16px 미만이면 iOS가 확대한다 */
+    .searchbar .btn-go { display: none; }                     /* 검색은 하단 고정 버튼으로 */
+    .segment { display: flex; gap: 6px; margin-top: 16px; padding: 0; background: none;
+               overflow-x: auto; -webkit-overflow-scrolling: touch; justify-content: flex-start; }
+    .seg { border: 1px solid #d3cabe; border-radius: 99px; background: #fff; padding: 7px 14px;
+           font-size: .82em; flex-shrink: 0; }
+    .seg.on { background: #191411; color: #fff; border-color: #191411; box-shadow: none; }
+    .chiprow { justify-content: flex-start; margin-top: 14px; }
+    .chip.more { display: none; }              /* 필터는 하단 버튼으로 연다 */
+    #status { text-align: left; }
+
+    #sheetdim.open { display: block; position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+                     background: rgba(20,15,12,.45); z-index: 55; }
+    #filters { margin: 0; max-width: none; border-radius: 16px 16px 0 0; border: 0;
+               padding: 10px 16px 20px; max-height: 82%; overflow-y: auto; }
+    #filters.open { position: fixed; left: 0; right: 0; bottom: 0; z-index: 60; }
+    .grab { display: block; width: 34px; height: 4px; border-radius: 99px; background: #d3cabe;
+            margin: 0 auto 14px; }
+    .sheet-title { display: block; margin: 0 0 14px; font-size: 1em; font-weight: bold; }
+    .fld { flex: 1 1 100%; }
+    .sheet-done { display: block; width: 100%; margin-top: 16px; padding: 13px; border: 0;
+                  border-radius: 10px; background: #191411; color: #fff; font-size: 1em;
+                  font-weight: bold; cursor: pointer; }
+
+    #mobilecta { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+                 gap: 9px; padding: 11px 16px 14px; background: #fff;
+                 border-top: 1px solid #e4ded5; }
+    #mobilecta .filter { border: 1px solid #d3cabe; border-radius: 10px; padding: 12px 15px;
+                         font-size: .88em; color: #4a423c; background: #fff; cursor: pointer;
+                         white-space: nowrap; }
+    #mobilecta .go { flex: 1; border: 0; border-radius: 10px; padding: 12px; background: #d2371a;
+                     color: #fff; font-size: 1em; font-weight: bold; cursor: pointer; }
+
+    #home { padding: 22px 0 30px; }
+    .strip-head { padding: 0 16px; }
+    /* 저장 맛집은 가로 캐러셀 — 두 장 반쯤 보여 옆에 더 있다는 것을 알린다 */
+    .mine-cards { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch;
+                  padding: 0 16px 4px; gap: 10px; }
+    .fcard { width: 142px; flex-shrink: 0; }
+    .fcard .fph { height: 88px; }
+    .mine-skel { padding: 8px 16px; }
+    .how { padding: 0 16px; margin-top: 26px; gap: 12px; }
+    .how-item { flex: 1 1 100%; }
+    #helpbox { margin: 22px 16px 0; }
+
+    #results { padding: 10px 10px 30px; }
     .card { width: 100%; padding: 14px; margin-bottom: 10px; border-radius: 14px; }
-    .top { gap: 12px; }
-    .photo { width: 92px; height: 92px; }
+    /* 폰에서는 사진을 카드 위로 크게 올린다 */
+    .top { display: block; }
+    .photo { width: 100%; height: 190px; border-radius: 10px; margin-bottom: 12px; }
     .name { font-size: 1.15em; display: inline-block; margin-bottom: 2px; }
     .meta { display: block; margin-left: 0; margin-top: 2px; font-size: .86em; }
     .rate { font-size: .95em; }
     table.facts { font-size: .95em; margin-top: 10px; }
     table.facts td { padding: 4px 0; }
-    table.facts td:first-child { width: 64px; }
+    table.facts td:first-child { width: 72px; white-space: nowrap; }
     .reviews { font-size: .95em; }
     #mapwrap { padding: 0 8px; }
     #allmap { height: 340px; }
@@ -1263,84 +1482,165 @@ PAGE = r"""<!doctype html>
 </style>
 </head>
 <body>
-<header>
-  <h1>맛집 브리핑</h1>
-  <input id="q" placeholder="동네 이름 (예: 역삼동, 서초동, 판교)" onkeydown="if(event.key==='Enter'||event.keyCode===13)doSearch()">
-  <select id="meal" title="시간대별 추천 기준" onchange="syncCuisine()">
-    <option value="all" selected>전체</option>
-    <option value="lunch">점심 (식사 위주)</option>
-    <option value="dinner">저녁 (술 한잔)</option>
-    <option value="cafe">카페 · 디저트</option>
-  </select>
-  <select id="cuisine" title="업종(요리 종류)별 검색 — 시간대와 함께 적용됩니다">
-    <option value="all" selected>업종 전체</option>__CUISINEOPTS__
-  </select>
-  <select id="radius">
-    <option value="500">500m</option>
-    <option value="1000" selected>1km</option>
-    <option value="1500">1.5km</option>
-    <option value="2000">2km</option>
-    <option value="3000">3km</option>
-  </select>
-  <select id="cnt" title="추출 개수">
-    <option value="10">10곳</option>
-    <option value="20">20곳</option>
-    <option value="30" selected>30곳</option>
-    <option value="40">40곳</option>
-    <option value="50">50곳</option>
-    <option value="60">60곳</option>
-    <option value="70">70곳</option>
-    <option value="80">80곳</option>
-    <option value="90">90곳</option>
-    <option value="100">100곳</option>
-  </select>
-  <select id="cert" title="인증 맛집 필터 (카카오맵 검색 연관 기준)">
-    <option value="none" selected>인증 무관</option>
-    <option value="any">인증맛집만 (통합)</option>
-    <option value="michelin">미쉐린 가이드</option>
-    <option value="blueribbon">블루리본</option>
-    <option value="century">백년가게</option>
-    <option value="bwchef">흑백요리사</option>
-  </select>
-  <select id="rate" title="카카오맵 별점 필터">
-    <option value="0" selected>평점 무관</option>
-    <option value="4">★4.0 이상</option>
-  </select>
-  <select id="mine" title="네이버지도에 저장해둔 내 맛집">
-    <option value="prefer" selected>내 저장 우선</option>
-    <option value="only">내 저장만</option>
-    <option value="off">내 저장 무시</option>
-  </select>
-  <button onclick="doSearch()">검색</button>
-  <button id="mapbtn" onclick="toggleMap()" style="display:none">지도로 보기</button>
-  <span id="status"></span>
-</header>
+
+<div class="brandbar">
+  <span class="logo">
+    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path d="M3 10.5h18c0 5-4 8.5-9 8.5s-9-3.5-9-8.5z" fill="#d2371a"></path>
+      <path d="M2 10.5h20" stroke="#191411" stroke-width="1.6" stroke-linecap="round"></path>
+      <path d="M9 7.2c0-1.4 1.2-1.6 1.2-3M13 6.6c0-1.2 1-1.4 1-2.6" stroke="#a87b22"
+            stroke-width="1.5" stroke-linecap="round"></path>
+    </svg>
+    <b>맛집 브리핑</b>
+  </span>
+  <span class="brandnav">
+    <button type="button" class="linkbtn" id="mapbtn" onclick="toggleMap()" style="display:none">지도로 보기</button>
+    <button type="button" class="linkbtn" onclick="toggleHelp()">이렇게 동작해요</button>
+  </span>
+</div>
+
+<div class="hero">
+  <div class="hero-strip" aria-hidden="true">
+    <div class="ph0"></div><div class="ph2"></div><div class="ph1"></div>
+    <div class="ph4"></div><div class="ph3"></div><div class="ph5"></div>
+  </div>
+  <div class="hero-inner">
+    <h2>오늘 어디서 먹을까요?</h2>
+    <p class="sub">동네 이름만 넣으면 <span class="sub-long">반경 안의 맛집을 </span>사진 · 대표 메뉴 · 가격대 · 블로그 반응으로 정리해 드립니다</p>
+
+    <div class="searchbar">
+      <span class="searchfield">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#191411"
+             stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+          <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.6-3.6"></path>
+        </svg>
+        <input id="q" placeholder="역삼동, 서초동, 판교…" aria-label="동네 이름"
+               onkeydown="if(event.key==='Enter'||event.keyCode===13)doSearch()">
+      </span>
+      <button type="button" class="btn-go" onclick="doSearch()">검색</button>
+    </div>
+
+    <div class="segment" id="segment">
+      <button type="button" class="seg on" data-meal="all" onclick="pickMeal(this)">전체</button>
+      <button type="button" class="seg" data-meal="lunch" onclick="pickMeal(this)">점심</button>
+      <button type="button" class="seg" data-meal="dinner" onclick="pickMeal(this)">저녁</button>
+      <button type="button" class="seg" data-meal="cafe" onclick="pickMeal(this)">카페 · 디저트</button>
+    </div>
+
+    <div class="chiprow">
+      <span class="chiplbl" id="recentlbl" style="display:none">최근</span>
+      <span id="recent"></span>
+      <button type="button" class="chip more" id="filterchip" onclick="toggleFilters()">＋ 상세 필터 · <span id="filtersum"></span></button>
+    </div>
+
+    <div id="status"></div>
+
+    <div id="filters">
+      <div class="grab"></div>
+      <h3 class="sheet-title">상세 필터</h3>
+      <div class="fgrid">
+        <label class="fld"><span class="k">반경</span>
+          <select id="radius" onchange="updateFilterSummary()">
+            <option value="500">500m</option>
+            <option value="1000" selected>1km</option>
+            <option value="1500">1.5km</option>
+            <option value="2000">2km</option>
+            <option value="3000">3km</option>
+          </select>
+        </label>
+        <label class="fld"><span class="k">업종</span>
+          <select id="cuisine" onchange="updateFilterSummary()">
+            <option value="all" selected>업종 전체</option>__CUISINEOPTS__
+          </select>
+        </label>
+        <label class="fld"><span class="k">추출 개수</span>
+          <select id="cnt" onchange="updateFilterSummary()">
+            <option value="10">10곳</option>
+            <option value="20">20곳</option>
+            <option value="30" selected>30곳</option>
+            <option value="40">40곳</option>
+            <option value="50">50곳</option>
+            <option value="60">60곳</option>
+            <option value="70">70곳</option>
+            <option value="80">80곳</option>
+            <option value="90">90곳</option>
+            <option value="100">100곳</option>
+          </select>
+        </label>
+        <label class="fld"><span class="k">인증 맛집</span>
+          <select id="cert" onchange="updateFilterSummary()">
+            <option value="none" selected>인증 무관</option>
+            <option value="any">인증맛집만 (통합)</option>
+            <option value="michelin">미쉐린 가이드</option>
+            <option value="blueribbon">블루리본</option>
+            <option value="century">백년가게</option>
+            <option value="bwchef">흑백요리사</option>
+          </select>
+        </label>
+        <label class="fld"><span class="k">평점</span>
+          <select id="rate" onchange="updateFilterSummary()">
+            <option value="0" selected>평점 무관</option>
+            <option value="4">★4.0 이상</option>
+          </select>
+        </label>
+        <label class="fld"><span class="k">내 저장 맛집</span>
+          <select id="mine" onchange="updateFilterSummary()">
+            <option value="prefer" selected>내 저장 우선</option>
+            <option value="only">내 저장만</option>
+            <option value="off">내 저장 무시</option>
+          </select>
+        </label>
+      </div>
+      <button type="button" class="sheet-done" onclick="toggleFilters()">적용</button>
+    </div>
+  </div>
+</div>
+
+<div id="sheetdim" onclick="toggleFilters()"></div>
+
+<!-- 시간대는 위 세그먼트 버튼으로 고른다. 값은 여기에 담아 검색에 그대로 실린다. -->
+<select id="meal" style="display:none" onchange="syncCuisine()">
+  <option value="all" selected>전체</option>
+  <option value="lunch">점심 (식사 위주)</option>
+  <option value="dinner">저녁 (술 한잔)</option>
+  <option value="cafe">카페 · 디저트</option>
+</select>
+
 <div id="mapwrap">
   <div id="allmap"></div>
   <p class="map-hint">번호 핀을 클릭하면 가게 이름이 표시됩니다. 카드 목록의 번호와 동일합니다.</p>
 </div>
-<div id="results">
-  <div class="notice">동네 이름을 입력하면 반경 이내 맛집을 찾아
-사진 · 주요 메뉴 · 가격대 · 블로그 반응을 정리해 드립니다.
 
-시간대를 고르면 기준이 달라집니다:
-· 점심 — 식사 위주 (술집·안주 전문점 제외)
-· 저녁 — 술을 곁들이기 좋은 집 (고기·회·주점 등)
-· 카페·디저트 — 카페·베이커리·디저트 전문점 (룸카페 등 제외)
+<div id="home">
+  <div id="minewrap" style="display:none">
+    <div class="strip-head">
+      <h3>내 저장 맛집 <span id="minecount"></span></h3>
+    </div>
+    <div class="mine-cards" id="minecards"><div class="mine-skel">불러오는 중…</div></div>
+  </div>
 
-업종(한식·중식·일식·양식·고기·해산물·회·치킨·아시안·분식)은 시간대와 함께
-걸 수 있습니다. 업종을 고르면 그 업종이 우선이라, "저녁 × 중식"처럼 시간대
-기준에 없는 조합도 결과가 나옵니다. (카페·디저트에서는 업종 선택이 꺼집니다)
+  <div class="how">
+    <div class="how-item"><b>점심</b><span>식사 위주로 봅니다. 술집·안주 전문점은 뺍니다.</span></div>
+    <div class="how-item"><b>저녁</b><span>술 곁들이기 좋은 집을 봅니다. 고기·회·주점을 넣습니다.</span></div>
+    <div class="how-item"><b>카페 · 디저트</b><span>카페·베이커리·디저트 전문점만 봅니다.</span></div>
+  </div>
 
-내 저장 맛집(네이버지도에 저장한 리스트)은 기본으로 맨 위에 ♥가본곳·♡가볼곳
-배지와 함께 표시됩니다. "내 저장만" 선택 시 저장한 곳만 볼 수 있습니다.
+  <div id="helpbox">업종(한식·중식·일식·양식·고기·해산물·회·치킨·아시안·분식)은 시간대와 함께 걸 수 있습니다. 업종을 고르면 그 업종이 우선이라, "저녁 × 중식"처럼 시간대 기준에 없는 조합도 결과가 나옵니다. (카페·디저트에서는 업종 선택이 꺼집니다)
 
-인증 필터(미쉐린 가이드·블루리본·백년가게·흑백요리사)는 카카오맵 검색 연관 기준의
-참고용 분류입니다. 공식 명부가 공개되어 있지 않아 누락·오포함이 있을 수
-있으며, 블루리본은 데이터가 적어 결과가 없을 수 있습니다.
+내 저장 맛집(네이버지도에 저장한 리스트)은 기본으로 맨 위에 ♥가본곳·♡가볼곳 배지와 함께 표시됩니다. "내 저장만"을 고르면 저장한 곳만 볼 수 있습니다.
 
-예) "역삼동" / "서초동" / "판교" / "강남역"</div>
+인증 필터(미쉐린 가이드·블루리본·백년가게·흑백요리사)는 카카오맵 검색 연관 기준의 참고용 분류입니다. 공식 명부가 공개되어 있지 않아 누락·오포함이 있을 수 있으며, 블루리본은 데이터가 적어 결과가 없을 수 있습니다.
+
+별점·메뉴판은 카카오맵 상세 페이지에서 가져옵니다. 막히면 별점·메뉴판 없이 블로그 요약만으로 동작합니다.</div>
 </div>
+
+<div id="results"></div>
+
+<div id="mobilecta">
+  <button type="button" class="filter" onclick="toggleFilters()">필터</button>
+  <button type="button" class="go" onclick="doSearch()">검색</button>
+</div>
+
 <script>
 // IE 모드/구형 브라우저에서도 동작하도록 ES5 문법(var, function, XHR)만 사용한다.
 var searching = false;
@@ -1361,14 +1661,126 @@ function ajax(method, url, body, cb) {
 
 var lastPlaces = [];  // 지도 표시용 — 마지막 검색 결과
 
+// ── 시간대 세그먼트 ────────────────────────────────────────
+function pickMeal(btn) {
+  var segs = document.getElementById('segment').getElementsByTagName('button');
+  for (var i = 0; i < segs.length; i++) segs[i].className = 'seg';
+  btn.className = 'seg on';
+  document.getElementById('meal').value = btn.getAttribute('data-meal');
+  syncCuisine();
+  updateFilterSummary();
+}
+
 function syncCuisine() {
   // 카페·디저트는 업종 축과 배타 — 선택을 초기화하고 잠근다
   var sel = document.getElementById('cuisine');
   sel.disabled = (document.getElementById('meal').value === 'cafe');
   if (sel.disabled) sel.value = 'all';
 }
-syncCuisine();
 
+// ── 상세 필터 (PC 펼침 / 모바일 바텀시트) ──────────────────
+function toggleFilters() {
+  var box = document.getElementById('filters');
+  var dim = document.getElementById('sheetdim');
+  var chip = document.getElementById('filterchip');
+  var open = box.className.indexOf('open') < 0;
+  box.className = open ? 'open' : '';
+  dim.className = open ? 'open' : '';
+  chip.className = open ? 'chip more on' : 'chip more';
+}
+
+function updateFilterSummary() {
+  var 반경 = document.getElementById('radius');
+  var 개수 = document.getElementById('cnt');
+  var 인증 = document.getElementById('cert');
+  var 평점 = document.getElementById('rate');
+  var 업종 = document.getElementById('cuisine');
+  var 부분 = [반경.options[반경.selectedIndex].text, 개수.options[개수.selectedIndex].text];
+  if (!업종.disabled && 업종.value !== 'all') 부분.push(업종.options[업종.selectedIndex].text);
+  if (인증.value !== 'none') 부분.push(인증.options[인증.selectedIndex].text);
+  if (평점.value === '4') 부분.push('★4.0 이상');
+  document.getElementById('filtersum').textContent = 부분.join(' · ');
+}
+
+function toggleHelp() {
+  var box = document.getElementById('helpbox');
+  box.className = box.className.indexOf('open') < 0 ? 'open' : '';
+}
+
+// ── 최근 검색한 동네 (브라우저에만 저장, 서버 전송 없음) ───
+function recentGet() {
+  try {
+    var raw = window.localStorage.getItem('mb_recent');
+    var arr = raw ? JSON.parse(raw) : [];
+    return Object.prototype.toString.call(arr) === '[object Array]' ? arr : [];
+  } catch (e) { return []; }   // 시크릿 모드·저장소 차단 시 조용히 비활성
+}
+
+function recentPush(q) {
+  try {
+    var arr = recentGet(), out = [q], i;
+    for (i = 0; i < arr.length && out.length < 5; i++) if (arr[i] !== q) out.push(arr[i]);
+    window.localStorage.setItem('mb_recent', JSON.stringify(out));
+    renderRecent();
+  } catch (e) { /* 저장 못 해도 검색은 정상 동작한다 */ }
+}
+
+function renderRecent() {
+  var arr = recentGet();
+  var box = document.getElementById('recent');
+  document.getElementById('recentlbl').style.display = arr.length ? '' : 'none';
+  box.innerHTML = arr.map(function (n) {
+    return '<button type="button" class="chip" onclick="pickRecent(this)">' + esc(n) + '</button>';
+  }).join(' ');
+}
+
+function pickRecent(btn) {
+  document.getElementById('q').value = btn.textContent;
+  doSearch();
+}
+
+// ── 첫 화면: 내 저장 맛집 카드 ─────────────────────────────
+// 페이지를 먼저 그린 뒤 따로 불러온다 — 첫 화면이 사진 조회를 기다리지 않도록.
+function loadMine() {
+  ajax('GET', '/mine', null, function (err, data) {
+    var wrap = document.getElementById('minewrap');
+    if (err || !data || !data.items || !data.items.length) { wrap.style.display = 'none'; return; }
+    wrap.style.display = '';
+    document.getElementById('minecount').textContent = '네이버지도에서 불러온 ' + data.items.length + '곳';
+    document.getElementById('minecards').innerHTML = data.items.map(function (m) {
+      var 사진 = m.photo
+        ? '<img src="' + esc(m.photo) + '" alt="" referrerpolicy="no-referrer">'
+        : '';
+      var 배지 = m.badge ? '<span class="cert ' + certClass(m.badge) + '">' + esc(m.badge) + '</span>' : '';
+      var 별점 = m.rating ? ' · ★' + m.rating : '';
+      var 열기 = m.url ? ' href="' + esc(m.url) + '" target="_blank"' : '';
+      return '<a class="fcard"' + 열기 + '>'
+        + '<div class="fph ' + phClass(m.name) + '">' + 사진 + '</div>'
+        + '<div class="fbody"><div class="fnm">' + esc(m.name) + '</div>'
+        + '<div class="fdt">' + esc(m.category || '저장한 곳') + 별점 + '</div>'
+        + 배지 + '</div></a>';
+    }).join('');
+  });
+}
+
+// 사진이 없을 때 쓰는 색 타일 — 상호에서 정해 같은 가게는 늘 같은 색이 되게 한다
+function phClass(name) {
+  var h = 0, i;
+  for (i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 6;
+  return 'ph' + h;
+}
+
+function certClass(b) {
+  if (b.indexOf('☕') >= 0) return 'c-cf';
+  if (b.indexOf('가본곳') >= 0) return 'c-my';
+  if (b.indexOf('가볼곳') >= 0 || b.indexOf('내저장') >= 0) return 'c-my2';
+  if (b === '미쉐린') return 'c-mi';
+  if (b === '블루리본') return 'c-bl';
+  if (b === '흑백요리사') return 'c-bw';
+  return 'c-hu';
+}
+
+// ── 검색 ───────────────────────────────────────────────────
 function doSearch() {
   if (searching) return;
   var q = document.getElementById('q').value.replace(/^\s+|\s+$/g, '');
@@ -1379,8 +1791,11 @@ function doSearch() {
   var cert = document.getElementById('cert').value;
   var rate = document.getElementById('rate').value;
   var mine = document.getElementById('mine').value;
-  if (!q) return;
+  if (!q) { document.getElementById('q').focus(); return; }
+  if (document.getElementById('filters').className.indexOf('open') >= 0) toggleFilters();
   searching = true;
+  recentPush(q);
+  document.getElementById('home').style.display = 'none';
   var status = document.getElementById('status');
   var results = document.getElementById('results');
   status.textContent = (cert !== 'none' || rate === '4')
@@ -1444,15 +1859,7 @@ function renderBase(data) {
   }
   results.innerHTML = data.places.map(function (p, i) {
     var certs = (p.badges || []).map(function (b) {
-      var cls;
-      if (b.indexOf('☕') >= 0) cls = 'c-cf';
-      else if (b.indexOf('가본곳') >= 0) cls = 'c-my';
-      else if (b.indexOf('가볼곳') >= 0 || b.indexOf('내저장') >= 0) cls = 'c-my2';
-      else if (b === '미쉐린') cls = 'c-mi';
-      else if (b === '블루리본') cls = 'c-bl';
-      else if (b === '흑백요리사') cls = 'c-bw';
-      else cls = 'c-hu';
-      return '<span class="cert ' + cls + '">' + esc(b) + '</span>';
+      return '<span class="cert ' + certClass(b) + '">' + esc(b) + '</span>';
     }).join('');
     var rating = p.rating ? '★' + p.rating + (p.rating_count ? ' (' + p.rating_count + ')' : '') : '';
     var hours = p.hours ? esc(p.hours) + (p.open_status ? ' · ' + esc(p.open_status) : '') : '정보 없음';
@@ -1460,7 +1867,7 @@ function renderBase(data) {
                 : (p.phone ? '전화 예약 문의 (' + esc(p.phone) + ')' : '매장 문의');
     return '<div class="card" id="card-' + i + '">'
     + '<div class="top">'
-    +   '<div class="photo" id="photo-' + i + '">사진 준비 중</div>'
+    +   '<div class="photo ' + phClass(p.name) + '" id="photo-' + i + '"></div>'
     +   '<div class="info">'
     +     '<a class="name" href="' + esc(p.url) + '" target="_blank" title="카카오맵에서 별점·상세 보기">' + (i + 1) + '. ' + esc(p.name) + '</a>'
     +     certs
@@ -1485,18 +1892,14 @@ function fillDetail(items, offset) {
   items.forEach(function (d, n) {
     var i = (offset || 0) + n;  // 구간 단위로 오므로 카드 번호는 전체 목록 기준으로 환산
     var photo = document.getElementById('photo-' + i);
-    if (photo) {
-      if (d.photo) {
-        var img = document.createElement('img');
-        img.referrerPolicy = 'no-referrer';
-        img.alt = '';
-        img.onerror = function () { photo.textContent = '사진 없음'; };
-        img.src = d.photo;
-        photo.textContent = '';
-        photo.appendChild(img);
-      } else {
-        photo.textContent = '사진 없음';
-      }
+    if (photo && d.photo) {
+      var img = document.createElement('img');
+      img.referrerPolicy = 'no-referrer';
+      img.alt = '';
+      img.onerror = function () { photo.innerHTML = ''; };  // 실패하면 색 타일만 남긴다
+      img.src = d.photo;
+      photo.innerHTML = '';
+      photo.appendChild(img);
     }
     setText('menu-' + i, d.menu);
     setText('price-' + i, d.price);
@@ -1519,7 +1922,7 @@ function fillDetail(items, offset) {
 
 function setText(id, text) {
   var el = document.getElementById(id);
-  if (el) { el.textContent = text; el.classList.remove('skeleton'); }
+  if (el) { el.textContent = text; el.className = el.className.replace(/\s*skeleton/, ''); }
 }
 
 function fmtDist(m) { return m >= 1000 ? (m / 1000).toFixed(1) + 'km' : m + 'm'; }
@@ -1542,7 +1945,7 @@ function renderMap() {
   if (!mapOpen || !lastPlaces.length) return;
   if (typeof kakao === 'undefined' || !kakao.maps || !kakao.maps.load) {
     document.getElementById('allmap').innerHTML =
-      '<div style="padding:40px;text-align:center;color:#889">지도를 불러오지 못했습니다.<br>Edge 일반 모드 또는 Chrome으로 열어주세요.</div>';
+      '<div style="padding:40px;text-align:center;color:#8b8078">지도를 불러오지 못했습니다.<br>Edge 일반 모드 또는 Chrome으로 열어주세요.</div>';
     return;
   }
   kakao.maps.load(function () {
@@ -1577,6 +1980,13 @@ function renderMap() {
     setTimeout(function () { theMap.relayout(); theMap.setBounds(bounds); }, 100);
   });
 }
+
+// ── 시작 ───────────────────────────────────────────────────
+syncCuisine();
+updateFilterSummary();
+renderRecent();
+loadMine();
+document.getElementById('q').focus();
 </script>
 <script src="__SDKPATH__?appkey=__JSKEY__&autoload=false"></script>
 </body>
@@ -1668,6 +2078,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception as e:
                 정보["error"] = f"{type(e).__name__}: {str(e)[:150]}"
             self._send_json(정보)
+        elif parsed.path == "/mine":  # 첫 화면 저장 맛집 카드 (페이지를 먼저 그린 뒤 채운다)
+            try:
+                self._send_json({"items": 내맛집홈()})
+            except Exception as e:
+                self._send_json({"items": [], "error": f"{type(e).__name__}: {e}"})
         elif parsed.path == SDK_PATH:  # 카카오맵 JS SDK 프록시 (사내망 차단 우회)
             try:
                 self._send(카카오SDK(), "text/javascript; charset=utf-8")
