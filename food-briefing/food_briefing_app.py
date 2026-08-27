@@ -853,6 +853,43 @@ _상세결과캐시: dict[str, dict] = {}  # place id → panel3 요약 (검색�
 _상세캐시잠금 = threading.Lock()
 
 
+# 카카오맵 상세(panel3)와 상세 페이지는 비공식 경로라, 한꺼번에 몰아 부르면
+# 앞의 몇 건만 받고 나머지를 막는다. 예전에는 검색이 동시 10개로 두드리고
+# 막히면 즉시 포기해, 11번째 가게부터 사진·별점이 통째로 비었다.
+#
+# 실제 제한값이 공개돼 있지 않으므로 고정 간격을 박지 않는다. 막히면 간격을
+# 늘리고 잘 통과하면 도로 줄이는 방식으로, 그때그때 통하는 속도를 찾아간다.
+# 여유 있는 시간대에는 간격이 0으로 수렴해 예전만큼 빠르다.
+_카카오상세동시 = threading.Semaphore(4)  # 순간 폭주를 막는 상한
+_상세재시도 = 6
+_상세간격상한 = 0.6
+_상세페이스잠금 = threading.Lock()
+_상세다음시각 = [0.0]
+_상세간격 = [0.0]
+
+
+def _상세페이스():
+    """다음 호출까지 순서를 잡아 간격을 벌린다 (간격이 0이면 그대로 통과)."""
+    with _상세페이스잠금:
+        지금 = time.monotonic()
+        예정 = max(지금, _상세다음시각[0])
+        _상세다음시각[0] = 예정 + _상세간격[0]
+    남음 = 예정 - time.monotonic()
+    if 남음 > 0:
+        time.sleep(남음)
+
+
+def _상세제한겪음():
+    with _상세페이스잠금:
+        _상세간격[0] = min(_상세간격상한, max(0.1, _상세간격[0] * 2))
+
+
+def _상세통과():
+    with _상세페이스잠금:
+        if _상세간격[0]:
+            _상세간격[0] = max(0.0, _상세간격[0] * 0.9)
+
+
 def _카카오상세(place_url: str) -> dict:
     """카카오맵 상세 페이지가 쓰는 내부 API(panel3)에서
     메뉴판(이름·가격)·대표 사진·별점·영업시간·예약 여부를 가져온다.
@@ -863,16 +900,32 @@ def _카카오상세(place_url: str) -> dict:
     with _상세캐시잠금:
         if pid in _상세결과캐시:
             return _상세결과캐시[pid]
-    try:
-        resp = requests.get(
-            f"https://place-api.map.kakao.com/places/panel3/{pid}",
-            headers=_KAKAO_PANEL_HEADERS,
-            timeout=10,
-        )
+    d = None
+    for 시도 in range(_상세재시도):
+        _상세페이스()
+        try:
+            with _카카오상세동시:
+                resp = requests.get(
+                    f"https://place-api.map.kakao.com/places/panel3/{pid}",
+                    headers=_KAKAO_PANEL_HEADERS,
+                    timeout=10,
+                )
+        except requests.RequestException:
+            return {}
+        if resp.status_code in (429, 403, 500, 502, 503):  # 호출 제한 → 간격을 늘리고 다시
+            _상세제한겪음()
+            time.sleep(0.4 * (시도 + 1))
+            continue
+        _상세통과()
         if resp.status_code != 200:
             return {}
-        d = resp.json()
-    except (requests.RequestException, ValueError):
+        try:
+            d = resp.json()
+        except ValueError:
+            return {}
+        break
+    if d is None:  # 재시도해도 계속 막히면 사진·별점 없이 나머지 정보로 표시한다
+        print(f"카카오맵 상세 조회 실패({pid}) — 마지막 응답 {resp.status_code}")
         return {}
     결과 = {}
     메뉴들 = ((d.get("menu") or {}).get("menus") or {}).get("items") or []
@@ -919,15 +972,28 @@ def _카카오사진(place_url: str):
     pid = place_url.rstrip("/").split("/")[-1]
     if not pid.isdigit():
         return None
-    try:
-        resp = requests.get(
-            f"https://place.map.kakao.com/{pid}",
-            headers={"User-Agent": _브라우저_UA},
-            timeout=10,
-        )
+    resp = None
+    for 시도 in range(_상세재시도):
+        _상세페이스()
+        try:
+            with _카카오상세동시:
+                resp = requests.get(
+                    f"https://place.map.kakao.com/{pid}",
+                    headers={"User-Agent": _브라우저_UA},
+                    timeout=10,
+                )
+        except requests.RequestException:
+            return None
+        if resp.status_code in (429, 403, 500, 502, 503):
+            _상세제한겪음()
+            time.sleep(0.4 * (시도 + 1))
+            resp = None
+            continue
+        _상세통과()
         if resp.status_code != 200:
             return None
-    except requests.RequestException:
+        break
+    if resp is None:
         return None
     m = re.search(r'property="og:image"\s+content="([^"]+)"', resp.text)
     if not m:
