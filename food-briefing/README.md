@@ -49,15 +49,18 @@ python food_briefing_app.py
 
 Windows에서는 환경변수가 프로세스에 없으면 사용자 레지스트리(`HKCU\Environment`)에서도 찾습니다. 재로그인 전에 등록한 값도 바로 잡힙니다.
 
-## 배포 시 주의
+## 배포
 
-이 앱이 폴더 안으로 옮겨졌으므로, 호스팅 서비스의 start command도 경로를 포함하도록 바꿔야 합니다.
+저장소 루트의 `render.yaml`에 설정이 들어 있습니다.
 
 ```
-python food-briefing/food_briefing_app.py
+Build   pip install -r food-briefing/requirements.txt
+Start   python food-briefing/food_briefing_app.py
 ```
 
-의존성 설치 경로도 `food-briefing/requirements.txt`입니다.
+**대시보드에서 직접 만든 기존 서비스에는 `render.yaml`이 자동 적용되지 않습니다.** Render Blueprint로 만든 서비스에만 적용되므로, 기존 서비스는 위 두 값을 대시보드에 그대로 옮겨 적어야 합니다. 앞으로 폴더 구조를 바꿀 때는 `render.yaml`과 대시보드를 함께 고쳐 주세요.
+
+`PORT`가 지정된 환경(클라우드)에서는 `0.0.0.0`에 바인딩하고 브라우저를 열지 않습니다.
 
 ## 함께 쓰는 파일
 

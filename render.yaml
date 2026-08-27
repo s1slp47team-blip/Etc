@@ -1,0 +1,40 @@
+# Render 배포 설정 (Blueprint).
+#
+# 대시보드에서 손으로 맞추던 build/start 명령을 저장소에 둔다. 폴더 구조를
+# 바꿔도 이 파일만 고치면 되고, 언제 왜 바뀌었는지 커밋에 남는다.
+#
+# 주의 — 이 파일은 "Blueprint로 만든 서비스"에만 적용된다. 대시보드에서
+# 직접 만든 기존 서비스는 계속 대시보드 설정을 쓰므로, 이 파일을 넣는 것만으로
+# 기존 서비스가 바뀌지는 않는다. 기존 서비스에는 아래 두 값을 그대로 옮겨
+# 적으면 되고, 나중에 서비스를 다시 만들 때 이 파일이 그대로 쓰인다.
+services:
+  - type: web
+    name: food-briefing
+    runtime: python
+    # 무료 플랜 기준. 유료로 쓰고 있다면 starter 등으로 바꾼다.
+    plan: free
+    branch: main
+    buildCommand: pip install -r food-briefing/requirements.txt
+    startCommand: python food-briefing/food_briefing_app.py
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      # 코드가 dict[str, ...] 문법을 써서 3.9 이상이 필요하다
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+      # 아래 값들은 저장소에 두지 않는다. sync: false 는 "이 변수를 쓰지만
+      # 값은 대시보드에서 넣는다"는 표시다 — 어떤 키가 필요한지는 남기고
+      # 값은 새어 나가지 않는다.
+      - key: KAKAO_REST_API_KEY   # 필수. 없으면 앱이 시작하자마자 종료된다
+        sync: false
+      - key: GEMINI_API_KEY       # 없으면 카카오맵 메뉴판 기준으로만 표시
+        sync: false
+      - key: GROQ_API_KEY         # Gemini 한도 소진 시 폴백 (선택)
+        sync: false
+      - key: KAKAO_JS_KEY         # 지도 표시용 (선택, 없으면 지도 버튼 비활성)
+        sync: false
+      - key: APP_PASSWORD         # 외부 공개 시 접속 암호 (선택)
+        sync: false
+      - key: MY_PLACE_LINKS       # 네이버지도 저장 리스트 링크 (선택)
+        sync: false
