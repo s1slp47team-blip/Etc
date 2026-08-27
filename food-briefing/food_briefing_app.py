@@ -28,8 +28,10 @@ r"""
 
 import concurrent.futures
 import http.server
+import itertools
 import json
 import os
+import random
 import re
 import socket
 import sys
@@ -682,8 +684,6 @@ def 맛집검색(
     if cert == "any":
         # 인증 종류별로 따로 모은 뒤 라운드로빈으로 섞는다 —
         # 한 인증(미쉐린)의 결과가 상위를 독식해 다른 인증이 밀려나지 않게
-        import itertools
-
         자료 = 인증자료(x, y, radius, 그룹코드들)
         풀들 = []
         for c in 인증검색어:
@@ -1018,9 +1018,33 @@ _홈캐시: dict[str, dict] = _캐시로드(_홈캐시파일, 홈캐시버전, �
 _홈캐시잠금 = threading.Lock()
 
 
+def _홈뽑기(전체: list[dict], 개수: int) -> list[dict]:
+    """첫 화면에 띄울 가게를 고른다.
+
+    폴더별로 묶어 번갈아 뽑는다 — 목록 앞에서 그냥 자르면 첫 폴더가 화면을
+    독식해 나머지 폴더는 영영 뜨지 않는다. 폴더 안에서는 매번 다시 섞어,
+    묻혀 있던 저장 맛집도 돌아가며 보이게 한다.
+
+    단, 이미 사진을 받아둔 가게를 앞세운다. 매번 처음 보는 가게만 뽑으면
+    화면을 열 때마다 카카오 조회가 붙어 첫 화면이 느려지기 때문이다.
+    (캐시가 차면 이 조건이 무의미해져 결국 전체에서 고르게 섞인다)"""
+    폴더별: dict[str, list] = {}
+    for s in 전체:
+        폴더별.setdefault(s["folder"], []).append(s)
+    with _홈캐시잠금:
+        받아둔 = set(_홈캐시)
+    for 목록 in 폴더별.values():
+        random.shuffle(목록)
+        목록.sort(key=lambda s: _이름정규화(s["name"]) not in 받아둔)  # 안정 정렬 → 섞인 순서 유지
+    순서 = []
+    for 묶음 in itertools.zip_longest(*폴더별.values()):
+        순서.extend(s for s in 묶음 if s is not None)
+    return 순서[:개수]
+
+
 def 내맛집홈() -> list[dict]:
     """첫 화면 카드 목록. 저장 리스트가 없으면 빈 목록을 돌려주고, 화면에서도 영역이 숨는다."""
-    저장 = 내맛집목록()[:홈표시수]
+    저장 = _홈뽑기(내맛집목록(), 홈표시수)
     if not 저장:
         return []
 

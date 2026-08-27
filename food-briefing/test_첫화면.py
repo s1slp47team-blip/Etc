@@ -87,9 +87,10 @@ print("\n[1] 저장 맛집 카드가 내려온다")
 호출수.clear()
 카드들 = app.내맛집홈()
 확인("카드 수", len(카드들) == len(저장가게), f"{len(카드들)}장")
+이름들 = sorted(c["name"] for c in 카드들)
+확인("저장한 가게가 모두 후보", 이름들 == sorted(nm for nm, _ in 저장가게), str(이름들))
 if 카드들:
     첫 = 카드들[0]
-    확인("이름", 첫["name"] == "역삼 손칼국수", 첫["name"])
     확인("사진 URL", 첫["photo"].startswith("https://"), 첫["photo"])
     확인("업종", 첫["category"] == "국수", 첫["category"])
     확인("별점", 첫["rating"] == 4.4, str(첫["rating"]))
@@ -121,7 +122,26 @@ _북마크 = []
 확인("빈 목록", app.내맛집홈() == [], "카드 없음 → 화면에서 영역이 숨는다")
 _북마크 = [{"name": nm, "px": "127.0365", "py": "37.5007"} for nm, _ in 저장가게]
 
-print("\n[5] 화면 스크립트가 쓰는 요소가 템플릿에 다 있다")
+print("\n[5] 첫 화면 선별 — 폴더를 골고루, 매번 다르게")
+폴더넷 = ([{"name": f"가{i}", "lat": 0.0, "lng": 0.0, "folder": "가본곳"} for i in range(20)]
+          + [{"name": f"나{i}", "lat": 0.0, "lng": 0.0, "folder": "가볼곳"} for i in range(20)]
+          + [{"name": f"다{i}", "lat": 0.0, "lng": 0.0, "folder": "카페"} for i in range(20)])
+app._홈캐시.clear()  # 아직 아무것도 안 받아둔 상태 = 순수하게 섞인 결과
+뽑기 = app._홈뽑기(폴더넷, 9)
+폴더수 = {}
+for s2 in 뽑기:
+    폴더수[s2["folder"]] = 폴더수.get(s2["folder"], 0) + 1
+확인("9곳을 뽑음", len(뽑기) == 9, f"{len(뽑기)}곳")
+확인("폴더 3개가 골고루", sorted(폴더수.values()) == [3, 3, 3], str(폴더수))
+뽑기2 = app._홈뽑기(폴더넷, 9)
+확인("다시 열면 구성이 달라짐",
+     [x["name"] for x in 뽑기] != [x["name"] for x in 뽑기2],
+     "매번 같은 가게만 보이지 않는다")
+한폴더 = [{"name": f"단{i}", "lat": 0.0, "lng": 0.0, "folder": "가본곳"} for i in range(5)]
+확인("폴더가 하나뿐이어도 동작", len(app._홈뽑기(한폴더, 9)) == 5, "5곳")
+확인("저장이 없으면 빈 목록", app._홈뽑기([], 9) == [])
+
+print("\n[6] 화면 스크립트가 쓰는 요소가 템플릿에 다 있다")
 필수 = ["id=\"q\"", "id=\"meal\"", "id=\"cuisine\"", "id=\"radius\"", "id=\"cnt\"", "id=\"cert\"",
         "id=\"rate\"", "id=\"mine\"", "id=\"status\"", "id=\"results\"", "id=\"mapbtn\"",
         "id=\"mapwrap\"", "id=\"allmap\"", "id=\"segment\"", "id=\"filters\"", "id=\"sheetdim\"",
