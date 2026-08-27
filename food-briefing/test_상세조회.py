@@ -105,7 +105,49 @@ app.requests.get = _없음
 확인("빈 결과", app._카카오상세("http://place.map.kakao.com/9999") == {})
 확인("재시도 없음", 집계["요청"] == 1, f"{집계['요청']}회")
 
-print("\n[4] 동시 호출 수가 묶여 있다")
+print("\n[4] 검색은 상세를 기다리지 않는다 (평점 필터가 꺼져 있을 때)")
+# 상세는 비공식 API라 느리다. 카드부터 그리고 /enrich 에서 채워야 첫 화면이 빨리 뜬다.
+가게수 = 12
+
+
+def _장소응답(url, **kw):
+    if "v2/local/search/keyword.json" in url:
+        질의 = (kw.get("params") or {}).get("query", "")
+        if any(t in 질의 for t in ("미쉐린", "미슐랭", "블루리본", "백년가게", "노포", "흑백요리사")):
+            return _응답({"documents": [], "meta": {"is_end": True}})
+        docs = [{"id": f"{7000 + i}", "place_name": f"가게{i}",
+                 "category_name": "음식점 > 한식 > 국수", "category_group_code": "FD6",
+                 "address_name": "역삼동", "road_address_name": "테헤란로 1", "phone": "",
+                 "place_url": f"http://place.map.kakao.com/{7000 + i}",
+                 "x": "127.0365", "y": "37.5007", "distance": "100"} for i in range(가게수)]
+        return _응답({"documents": docs, "meta": {"is_end": True}})
+    if "panel3" in url:
+        집계["요청"] += 1
+        return _응답({"kakaomap_review": {"score_set": {"average_score": 4.5, "review_count": 3}},
+                      "open_hours": {"headline": {"display_text": "영업중"}}})
+    if "maps-bookmark" in url:
+        return _응답({"bookmarkList": []})
+    return _응답({}, 404)
+
+
+app.requests.get = _장소응답
+app._인증맵캐시.clear()
+app._상세결과캐시.clear()
+집계["요청"] = 0
+목록 = app.맛집검색(127.0364, 37.5006, 1000, "all", 가게수, "none", False, "off", "all")
+확인("가게 목록은 나온다", len(목록) == 가게수, f"{len(목록)}곳")
+확인("상세를 부르지 않음", 집계["요청"] == 0, f"panel3 {집계['요청']}회")
+확인("별점은 비어 있음", all(p["rating"] is None for p in 목록), "/enrich 가 채운다")
+
+print("\n[5] 평점 필터를 켜면 검색 단계에서 상세를 받는다")
+app._인증맵캐시.clear()
+app._상세결과캐시.clear()
+집계["요청"] = 0
+걸러진 = app.맛집검색(127.0364, 37.5006, 1000, "all", 가게수, "none", True, "off", "all")
+확인("상세를 조회함", 집계["요청"] > 0, f"panel3 {집계['요청']}회")
+확인("별점이 채워짐", all(p["rating"] == 4.5 for p in 걸러진), f"{len(걸러진)}곳")
+
+print("\n[6] 동시 호출 수가 묶여 있다")
 확인("세마포어 존재", isinstance(app._카카오상세동시, type(threading.Semaphore(1))),
      f"동시 {app._카카오상세동시._value}개")
 
