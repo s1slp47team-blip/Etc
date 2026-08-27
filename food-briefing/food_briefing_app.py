@@ -2323,7 +2323,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 def main():
     url = f"http://localhost:{PORT}"
-    no_browser = os.environ.get("NO_BROWSER") == "1" or "--no-browser" in sys.argv
+    # 클라우드(PORT 지정)에는 열 브라우저가 없다 — 굳이 시도하지 않는다
+    no_browser = (os.environ.get("NO_BROWSER") == "1" or "--no-browser" in sys.argv
+                  or bool(os.environ.get("PORT")))
 
     if not gemini_client:
         print("경고: GEMINI_API_KEY가 없어 블로그 요약 없이 카카오맵 메뉴판 기준으로만 표시됩니다.")
