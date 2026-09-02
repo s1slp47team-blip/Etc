@@ -1829,7 +1829,6 @@ function loadMine() {
     var wrap = document.getElementById('minewrap');
     if (err || !data || !data.items || !data.items.length) { wrap.style.display = 'none'; return; }
     wrap.style.display = '';
-    document.getElementById('minecount').textContent = '네이버지도에서 불러온 ' + data.items.length + '곳';
     document.getElementById('minecards').innerHTML = data.items.map(function (m) {
       var 사진 = m.photo
         ? '<img src="' + esc(m.photo) + '" alt="" referrerpolicy="no-referrer">'
