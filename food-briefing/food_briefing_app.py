@@ -169,14 +169,73 @@ if GEMINI_KEY:
         pass
 
 
+# ── 0.5 계측 ────────────────────────────────────────────────────
+# 어디서 시간이 드는지 로그로 남긴다. 어느 단계가 느린지는 추측으로 좁히기
+# 어렵고, 외부 API 응답 시간은 서버가 있는 지역에 따라 크게 달라진다.
+# TIMING=0 을 넣으면 로그가 조용해진다.
+계측켬 = os.environ.get("TIMING", "1") != "0"
+_호출통계: dict[str, list] = {}  # 이름 → [건수, 총 초, 최대 초]
+_통계잠금 = threading.Lock()
+
+
+def _호출기록(이름: str, 걸린초: float) -> None:
+    if not 계측켬:
+        return
+    with _통계잠금:
+        칸 = _호출통계.setdefault(이름, [0, 0.0, 0.0])
+        칸[0] += 1
+        칸[1] += 걸린초
+        칸[2] = max(칸[2], 걸린초)
+
+
+def _통계뽑기() -> str:
+    """마지막으로 뽑은 뒤 쌓인 외부 호출을 요약하고 비운다.
+    요청이 겹치면 그 사이 호출이 한 줄에 섞여 나온다 — 건수는 대략치로 본다."""
+    with _통계잠금:
+        항목 = sorted(_호출통계.items())
+        _호출통계.clear()
+    return " · ".join(
+        f"{이름} {건수}회 평균 {총 / 건수:.2f}s 최대 {최대:.2f}s"
+        for 이름, (건수, 총, 최대) in 항목 if 건수
+    ) or "외부 호출 없음"
+
+
+class 잰다:
+    """with 잰다() as t: ...  → t.초 로 걸린 시간을 읽는다.
+    구간이 하나의 with로 안 감싸질 때는 t = 잰다().시작() ... t.멈춤()."""
+
+    def 시작(self):
+        self.기준 = time.monotonic()
+        self.초 = 0.0
+        return self
+
+    def 멈춤(self) -> float:
+        self.초 = time.monotonic() - self.기준
+        return self.초
+
+    def __enter__(self):
+        return self.시작()
+
+    def __exit__(self, *예외):
+        self.멈춤()
+        return False
+
+
+def _로그(줄: str) -> None:
+    if 계측켬:
+        print(줄)
+
+
 # ── 1. 카카오: 동네 좌표 + 반경 내 맛집 검색 ────────────────────
 def _kakao_get(path: str, params: dict) -> dict:
-    resp = requests.get(
-        f"https://dapi.kakao.com/v2/local/{path}",
-        headers={"Authorization": f"KakaoAK {KAKAO_KEY}"},
-        params=params,
-        timeout=30,
-    )
+    with 잰다() as t:
+        resp = requests.get(
+            f"https://dapi.kakao.com/v2/local/{path}",
+            headers={"Authorization": f"KakaoAK {KAKAO_KEY}"},
+            params=params,
+            timeout=30,
+        )
+    _호출기록("장소검색", t.초)
     if resp.status_code != 200:
         raise RuntimeError(f"카카오 API 오류 [{resp.status_code}] {resp.text[:200]}")
     return resp.json()
@@ -692,6 +751,9 @@ def 맛집검색(
         인증풀 = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         인증작업 = 인증풀.submit(인증맵, x, y, radius)
 
+    구간 = {}
+    수집시계 = 잰다().시작()
+
     if cert == "any":
         # 인증 종류별로 따로 모은 뒤 라운드로빈으로 섞는다 —
         # 한 인증(미쉐린)의 결과가 상위를 독식해 다른 인증이 밀려나지 않게
@@ -724,10 +786,14 @@ def 맛집검색(
                     for d in docs:
                         담기(d)
 
+    수집시계.멈춤()
+    구간["목록"] = 수집시계.초
+
     # ── 인증 배지 보강 ────────────────────────────────────────
     # 인증 필터를 안 걸고 검색해도 인증 맛집이면 배지가 보이도록 한다
     # (카페 모드는 인증 검색어가 음식점 위주라 생략)
     if 시간대 != "cafe":
+        배지시계 = 잰다().시작()
         try:
             # 위에서 미리 띄워 둔 조회를 거둔다 (cert 필터 경로는 여기서 조회 — 이미 캐시됨)
             인증정보 = 인증작업.result() if 인증작업 is not None else 인증맵(x, y, radius)
@@ -740,8 +806,11 @@ def 맛집검색(
         finally:
             if 인증풀 is not None:
                 인증풀.shutdown(wait=False)
+            배지시계.멈춤()
+            구간["인증배지"] = 배지시계.초  # 목록 검색과 겹쳐 도니 대기한 만큼만 잡힌다
 
     # ── 내 저장 맛집(네이버지도) 반영 ─────────────────────────
+    저장시계 = 잰다().시작()
     저장목록 = 내맛집목록() if 내저장 in ("prefer", "only") else []
     if 저장목록:
         # 반경 안의 저장 맛집이 카카오 검색에 안 잡혔으면 이름으로 직접 찾아 보강한다
@@ -835,6 +904,9 @@ def 맛집검색(
                 "booking": bool(상세.get("booking")),
             }
         )
+    저장시계.멈춤()
+    구간["저장맛집·정리"] = 저장시계.초
+    _로그("  [목록] " + " · ".join(f"{이름} {초:.2f}s" for 이름, 초 in 구간.items()))
     return places
 
 
@@ -843,12 +915,14 @@ def _카카오블로그(질의: str, 개수: int = 5) -> list[dict]:
     """카카오 블로그 검색 (무료: 일 3만 건). 장소 검색과 같은 REST 키를 쓴다."""
     for 시도 in range(4):
         try:
-            resp = requests.get(
-                "https://dapi.kakao.com/v2/search/blog",
-                headers={"Authorization": f"KakaoAK {KAKAO_KEY}"},
-                params={"query": 질의, "size": 개수, "sort": "accuracy"},
-                timeout=10,
-            )
+            with 잰다() as t:
+                resp = requests.get(
+                    "https://dapi.kakao.com/v2/search/blog",
+                    headers={"Authorization": f"KakaoAK {KAKAO_KEY}"},
+                    params={"query": 질의, "size": 개수, "sort": "accuracy"},
+                    timeout=10,
+                )
+            _호출기록("블로그검색", t.초)
         except requests.RequestException:
             return []
         if resp.status_code == 429:  # 초당 호출 제한 초과 → 잠시 대기 후 재시도
@@ -931,12 +1005,13 @@ def _카카오상세(place_url: str) -> dict:
     for 시도 in range(_상세재시도):
         _상세페이스()
         try:
-            with _카카오상세동시:
+            with 잰다() as t, _카카오상세동시:
                 resp = requests.get(
                     f"https://place-api.map.kakao.com/places/panel3/{pid}",
                     headers=_KAKAO_PANEL_HEADERS,
                     timeout=10,
                 )
+            _호출기록("가게상세", t.초)  # 대기(동시 상한·간격 조절)까지 포함한 시간
         except requests.RequestException:
             return {}
         if resp.status_code in (429, 403, 500, 502, 503):  # 호출 제한 → 간격을 늘리고 다시
@@ -1003,12 +1078,13 @@ def _카카오사진(place_url: str):
     for 시도 in range(_상세재시도):
         _상세페이스()
         try:
-            with _카카오상세동시:
+            with 잰다() as t, _카카오상세동시:
                 resp = requests.get(
                     f"https://place.map.kakao.com/{pid}",
                     headers={"User-Agent": _브라우저_UA},
                     timeout=10,
                 )
+            _호출기록("대표사진", t.초)
         except requests.RequestException:
             return None
         if resp.status_code in (429, 403, 500, 502, 503):
@@ -1176,16 +1252,18 @@ GEMINI_CHUNK = 10  # 가게 10곳씩 나눠 병렬 요약 — 호출 횟수(무�
 def _groq요약(prompt: str, 제한초: float = 60) -> list:
     """Gemini 한도 소진 시 Groq(무료, llama-3.3-70b)로 같은 요약을 수행한다.
     제한초: 남은 시간 예산. 고정 타임아웃을 쓰면 폴백 한 번이 예산을 넘길 수 있다."""
-    resp = requests.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {GROQ_KEY}"},
-        json={
-            "model": GROQ_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-        },
-        timeout=min(60.0, 제한초),
-    )
+    with 잰다() as t:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {GROQ_KEY}"},
+            json={
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+            },
+            timeout=min(60.0, 제한초),
+        )
+    _호출기록("요약(Groq)", t.초)
     resp.raise_for_status()
     text = resp.json()["choices"][0]["message"]["content"]
     m = re.search(r"\[.*\]", text, re.S)  # 앞뒤 설명 문장이 붙어도 JSON 배열만 추출
@@ -1214,15 +1292,17 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
             print(f"Gemini 요약 시간 예산 초과 — 구간 {start} 생략")
             break
         try:
-            resp = gemini_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                # thinking_config는 최신 flash 모델이 거부(400)하므로 사용하지 않는다
-                config=genai_types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    temperature=0.3,
-                ),
-            )
+            with 잰다() as t:
+                resp = gemini_client.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=prompt,
+                    # thinking_config는 최신 flash 모델이 거부(400)하므로 사용하지 않는다
+                    config=genai_types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        temperature=0.3,
+                    ),
+                )
+            _호출기록("요약(Gemini)", t.초)
             break
         except Exception as e:
             # 일시 오류는 재시도. 대기가 총 2분을 넘으면 유휴 연결이 끊기므로 짧게 유지한다.
@@ -1365,9 +1445,12 @@ def 브리핑생성(동네: str, places: list[dict]) -> tuple[list[dict], bool]:
     자료 수집이 늦어진 만큼 요약에 쓸 시간이 줄도록, 예산은 호출 시점부터 잰다."""
     마감 = time.monotonic() + 요약예산초
     # 카카오 검색 API 초당 제한 대응 — 10개 동시 수집 + 429 재시도(백오프)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
-        자료들 = list(pool.map(lambda p: 가게자료수집(동네, p), places))
-    요약 = gemini요약(동네, places, 자료들, 마감)
+    with 잰다() as 자료시계:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+            자료들 = list(pool.map(lambda p: 가게자료수집(동네, p), places))
+    with 잰다() as 요약시계:
+        요약 = gemini요약(동네, places, 자료들, 마감)
+    _로그(f"  [요약단계] 자료수집 {자료시계.초:.2f}s · 요약 {요약시계.초:.2f}s")
     # 대부분(80% 이상) 요약됐을 때만 성공으로 보고 캐시한다 — 한도 초과로
     # 통째로/절반쯤 빈 결과가 캐시에 박제되는 것을 막는다
     요약성공 = (not gemini_client) or len(요약) >= len(places) * 0.8
@@ -2331,10 +2414,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
             if stage == "base":
                 # 기초는 상세 캐시가 있어 금방 끝난다 → 따로 캐시하지 않는다
-                self._send_json({**응답, "items": 기초생성(base["places"][offset:끝]),
-                                 "partial": False})
+                with 잰다() as 기초시계:
+                    기초 = 기초생성(base["places"][offset:끝])
+                _로그(f"[채움] base offset={offset} {len(기초)}곳 · {기초시계.초:.2f}s")
+                _로그("  [외부] " + _통계뽑기())
+                self._send_json({**응답, "items": 기초, "partial": False})
                 return
-            items, 요약성공 = 브리핑생성(q, base["places"][offset:끝])
+            with 잰다() as 요약시계:
+                items, 요약성공 = 브리핑생성(q, base["places"][offset:끝])
+            _로그(f"[채움] summary offset={offset} {len(items)}곳 · {요약시계.초:.2f}s"
+                 + ("" if 요약성공 else " (요약 실패 — 메뉴판 기준)"))
+            _로그("  [외부] " + _통계뽑기())
             if 요약성공:  # Gemini가 통째로 실패한 구간은 캐시하지 않는다 (재검색 시 재시도)
                 with 캐시잠금:
                     상세캐시[key + (offset,)] = items
@@ -2355,11 +2445,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
             detail = _캐시된상세(key, len(cached["places"])) if cached else None
         if cached:
             return {**cached, "cached_detail": detail}
-        좌표 = 동네좌표(q)
+        with 잰다() as 좌표시계:
+            좌표 = 동네좌표(q)
         if not 좌표:
             return {"error": f'"{q}" 위치를 찾지 못했습니다. 동네 이름을 다시 확인해 주세요.'}
         center, x, y = 좌표
-        places = 맛집검색(x, y, radius, meal, cnt, cert, rate, mine, 업종=cuisine)
+        with 잰다() as 검색시계:
+            places = 맛집검색(x, y, radius, meal, cnt, cert, rate, mine, 업종=cuisine)
+        _로그(f"[검색] {q} {meal}/{cuisine} {radius}m → {len(places)}곳 · "
+             f"{좌표시계.초 + 검색시계.초:.2f}s (좌표 {좌표시계.초:.2f}s · 목록 {검색시계.초:.2f}s)")
+        _로그("  [외부] " + _통계뽑기())
         result = {"center": center, "places": places}
         with 캐시잠금:
             검색캐시[key] = result
