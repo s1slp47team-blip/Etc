@@ -13,6 +13,14 @@ services:
     runtime: python
     # 무료 플랜 기준. 유료로 쓰고 있다면 starter 등으로 바꾼다.
     plan: free
+    # 이 앱은 요청 한 번에 카카오 API를 수십 번 부른다. 서버가 미국(기본값
+    # oregon)에 있으면 그 호출이 매번 태평양을 왕복해 체감 속도가 눌린다.
+    # 한국에서 가장 가까운 리전은 싱가포르다.
+    #
+    # 주의 — 리전은 만들어진 서비스에서 바꿀 수 없다. 이 값을 고쳐도 기존
+    # 서비스는 그대로이고, 새 서비스를 Blueprint로 만들 때 적용된다.
+    # (그때 URL이 새로 정해진다는 점도 함께 고려해야 한다)
+    region: singapore
     branch: main
     buildCommand: pip install -r food-briefing/requirements.txt
     startCommand: python food-briefing/food_briefing_app.py
