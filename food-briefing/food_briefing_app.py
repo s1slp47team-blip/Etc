@@ -93,6 +93,17 @@ def _env(name: str):
         return None
 
 
+# 로그를 파이프로 받는 환경(Render 등)에서 파이썬은 stdout을 블록 버퍼링한다.
+# 그래서 print가 8KB쯤 쌓일 때까지 로그에 나타나지 않는다 — stderr로 나가는
+# 라이브러리 경고만 먼저 보이고, 접속 로그·진단 로그는 통째로 묻힌다.
+# 줄 단위로 내보내 제때 보이게 한다. (터미널에서는 원래 줄 단위라 변화 없음)
+for _스트림 in (sys.stdout, sys.stderr):
+    try:
+        _스트림.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):  # 표준 스트림이 아닌 경우(테스트 등)
+        pass
+
+
 KAKAO_KEY = _env("KAKAO_REST_API_KEY")
 GEMINI_KEY = _env("GEMINI_API_KEY")
 GROQ_KEY = _env("GROQ_API_KEY")  # Gemini 무료 한도 소진 시 폴백 (없으면 폴백 생략)
