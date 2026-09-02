@@ -1349,6 +1349,10 @@ PAGE = r"""<!doctype html>
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>맛집 브리핑</title>
+<!-- 제목용 둥근 글꼴. 사내망 등에서 차단되면 CSS의 대체 글꼴로 조용히 내려간다. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Jua&display=swap" rel="stylesheet">
 <style>
   /* 색: 따뜻한 종이색 바탕 + 고추장 계열 강조색.
      구형 브라우저(IE 모드)에서도 동작해야 하므로 CSS 변수와 position:sticky는 쓰지 않는다.
@@ -1380,7 +1384,10 @@ PAGE = r"""<!doctype html>
                 filter: blur(38px); -webkit-filter: blur(38px); }
   .hero-strip div { flex: 1; }
   .hero-inner { position: relative; }
-  .hero h2 { font-size: 1.72em; margin: 0 0 6px; letter-spacing: -.015em; font-weight: bold; }
+  /* 제목은 둥근 글꼴로. Jua는 굵기가 하나뿐이라 bold를 주면 브라우저가 억지로
+     굵게 그려 뭉개진다 → normal로 두고 크기를 조금 키워 무게를 맞춘다. */
+  .hero h2 { font-family: 'Jua', 'Apple SD Gothic Neo', 'Malgun Gothic', Gulim, 굴림, sans-serif;
+             font-size: 1.92em; margin: 0 0 6px; letter-spacing: -.01em; font-weight: normal; }
   .hero .sub { font-size: .86em; color: #8b8078; margin: 0 0 24px; }
 
   .searchbar { display: flex; gap: 8px; max-width: 560px; margin: 0 auto; }
@@ -1403,12 +1410,18 @@ PAGE = r"""<!doctype html>
 
   .chiprow { display: flex; gap: 8px; justify-content: center; align-items: center;
              margin-top: 18px; flex-wrap: wrap; }
-  .chiplbl { font-size: .78em; color: #8b8078; }
   .chip { border: 1px solid #d3cabe; border-radius: 99px; padding: 6px 14px; font-size: .84em;
           color: #4a423c; background: #fff; cursor: pointer; }
   .chip:hover { border-color: #191411; }
-  .chip.more { border-style: dashed; color: #8b8078; }
-  .chip.more.on { border-style: solid; border-color: #d2371a; color: #d2371a; }
+  /* 이전엔 점선·흐린 글자라 비활성처럼 보였다. 지금 걸린 조건을 그대로 띄우고
+     화살표로 펼침을 알려, 눌러서 바꿀 수 있는 자리임이 드러나게 한다. */
+  .chip.more { border-color: #191411; color: #191411; font-weight: bold; font-size: .88em;
+               padding: 9px 18px; box-shadow: 0 1px 2px rgba(25,20,17,.08); }
+  .chip.more:hover { background: #f1ece4; }
+  .chip.more .sum { font-weight: normal; color: #6b6259; margin-left: 2px; }
+  .chip.more .arw { color: #8b8078; margin-left: 7px; font-size: .9em; }
+  .chip.more.on { border-color: #d2371a; color: #d2371a; background: #fbeae4; }
+  .chip.more.on .sum, .chip.more.on .arw { color: #d2371a; }
 
   #status { color: #8b8078; font-size: .84em; margin-top: 14px; min-height: 1.2em; }
 
@@ -1432,6 +1445,7 @@ PAGE = r"""<!doctype html>
                 margin-bottom: 14px; }
   .strip-head h3 { margin: 0; font-size: 1.04em; }
   .strip-head h3 span { color: #8b8078; font-weight: normal; font-size: .84em; margin-left: 6px; }
+  .strip-head h3 .rand { color: #d2371a; }
   .mine-cards { display: flex; flex-wrap: wrap; gap: 14px; }
   .fcard { width: calc(25% - 11px); background: #fff; border: 1px solid #e4ded5;
            border-radius: 12px; overflow: hidden; text-decoration: none; color: inherit;
@@ -1450,10 +1464,10 @@ PAGE = r"""<!doctype html>
   .how-item b { display: block; font-size: .92em; }
   .how-item span { display: block; font-size: .84em; color: #8b8078; margin-top: 3px;
                    line-height: 1.6; }
-  #helpbox { display: none; margin-top: 26px; background: #fff; border: 1px solid #e4ded5;
-             border-radius: 12px; padding: 20px 24px; color: #4a423c; font-size: .88em;
-             line-height: 1.85; white-space: pre-line; }
-  #helpbox.open { display: block; }
+  /* 우상단 토글을 없앤 대신, 첫 화면 맨 아래 잔글씨로 상시 노출한다.
+     인증 필터의 누락·오포함 같은 주의사항은 어딘가에 남아 있어야 한다. */
+  #helpbox { margin-top: 26px; border-top: 1px solid #e4ded5; padding: 18px 2px 0;
+             color: #8b8078; font-size: .8em; line-height: 1.8; white-space: pre-line; }
 
   /* ── 결과 카드 (구조는 기존 그대로) ─────────────────────── */
   #results { max-width: 1200px; margin: 0 auto; padding: 16px 20px 40px;
@@ -1520,7 +1534,7 @@ PAGE = r"""<!doctype html>
     .logo b { font-size: .96em; }
     .linkbtn { padding: 6px 10px; font-size: .76em; white-space: nowrap; }
     .hero { padding: 24px 16px 20px; }
-    .hero h2 { font-size: 1.32em; }
+    .hero h2 { font-size: 1.46em; }
     .hero .sub { font-size: .8em; margin-bottom: 18px; }
     .sub-long { display: none; }
     .searchfield { padding: 0 13px; }
@@ -1601,7 +1615,6 @@ PAGE = r"""<!doctype html>
   </span>
   <span class="brandnav">
     <button type="button" class="linkbtn" id="mapbtn" onclick="toggleMap()" style="display:none">지도로 보기</button>
-    <button type="button" class="linkbtn" onclick="toggleHelp()">이렇게 동작해요</button>
   </span>
 </div>
 
@@ -1634,9 +1647,8 @@ PAGE = r"""<!doctype html>
     </div>
 
     <div class="chiprow">
-      <span class="chiplbl" id="recentlbl" style="display:none">최근</span>
-      <span id="recent"></span>
-      <button type="button" class="chip more" id="filterchip" onclick="toggleFilters()">＋ 상세 필터 · <span id="filtersum"></span></button>
+      <button type="button" class="chip more" id="filterchip" onclick="toggleFilters()"
+              aria-expanded="false">상세 필터 <span class="sum" id="filtersum"></span><span class="arw" id="filterarw">▾</span></button>
     </div>
 
     <div id="status"></div>
@@ -1720,7 +1732,7 @@ PAGE = r"""<!doctype html>
 <div id="home">
   <div id="minewrap" style="display:none">
     <div class="strip-head">
-      <h3>내 저장 맛집 <span id="minecount"></span></h3>
+      <h3>내 저장 맛집 <span class="rand">(랜덤 추천)</span> <span id="minecount"></span></h3>
     </div>
     <div class="mine-cards" id="minecards"><div class="mine-skel">불러오는 중…</div></div>
   </div>
@@ -1743,7 +1755,7 @@ PAGE = r"""<!doctype html>
 <div id="results"></div>
 
 <div id="mobilecta">
-  <button type="button" class="filter" onclick="toggleFilters()">필터</button>
+  <button type="button" class="filter" onclick="toggleFilters()">상세 필터</button>
   <button type="button" class="go" onclick="doSearch()">검색</button>
 </div>
 
@@ -1793,6 +1805,8 @@ function toggleFilters() {
   box.className = open ? 'open' : '';
   dim.className = open ? 'open' : '';
   chip.className = open ? 'chip more on' : 'chip more';
+  chip.setAttribute('aria-expanded', open ? 'true' : 'false');
+  document.getElementById('filterarw').innerHTML = open ? '&#9652;' : '&#9662;';
 }
 
 function updateFilterSummary() {
@@ -1806,43 +1820,6 @@ function updateFilterSummary() {
   if (인증.value !== 'none') 부분.push(인증.options[인증.selectedIndex].text);
   if (평점.value === '4') 부분.push('★4.0 이상');
   document.getElementById('filtersum').textContent = 부분.join(' · ');
-}
-
-function toggleHelp() {
-  var box = document.getElementById('helpbox');
-  box.className = box.className.indexOf('open') < 0 ? 'open' : '';
-}
-
-// ── 최근 검색한 동네 (브라우저에만 저장, 서버 전송 없음) ───
-function recentGet() {
-  try {
-    var raw = window.localStorage.getItem('mb_recent');
-    var arr = raw ? JSON.parse(raw) : [];
-    return Object.prototype.toString.call(arr) === '[object Array]' ? arr : [];
-  } catch (e) { return []; }   // 시크릿 모드·저장소 차단 시 조용히 비활성
-}
-
-function recentPush(q) {
-  try {
-    var arr = recentGet(), out = [q], i;
-    for (i = 0; i < arr.length && out.length < 5; i++) if (arr[i] !== q) out.push(arr[i]);
-    window.localStorage.setItem('mb_recent', JSON.stringify(out));
-    renderRecent();
-  } catch (e) { /* 저장 못 해도 검색은 정상 동작한다 */ }
-}
-
-function renderRecent() {
-  var arr = recentGet();
-  var box = document.getElementById('recent');
-  document.getElementById('recentlbl').style.display = arr.length ? '' : 'none';
-  box.innerHTML = arr.map(function (n) {
-    return '<button type="button" class="chip" onclick="pickRecent(this)">' + esc(n) + '</button>';
-  }).join(' ');
-}
-
-function pickRecent(btn) {
-  document.getElementById('q').value = btn.textContent;
-  doSearch();
 }
 
 // ── 첫 화면: 내 저장 맛집 카드 ─────────────────────────────
@@ -1900,7 +1877,6 @@ function doSearch() {
   if (!q) { document.getElementById('q').focus(); return; }
   if (document.getElementById('filters').className.indexOf('open') >= 0) toggleFilters();
   searching = true;
-  recentPush(q);
   document.getElementById('home').style.display = 'none';
   var status = document.getElementById('status');
   var results = document.getElementById('results');
@@ -2106,7 +2082,6 @@ function renderMap() {
 // ── 시작 ───────────────────────────────────────────────────
 syncCuisine();
 updateFilterSummary();
-renderRecent();
 loadMine();
 document.getElementById('q').focus();
 </script>

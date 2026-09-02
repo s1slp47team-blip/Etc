@@ -145,9 +145,18 @@ print("\n[6] 화면 스크립트가 쓰는 요소가 템플릿에 다 있다")
 필수 = ["id=\"q\"", "id=\"meal\"", "id=\"cuisine\"", "id=\"radius\"", "id=\"cnt\"", "id=\"cert\"",
         "id=\"rate\"", "id=\"mine\"", "id=\"status\"", "id=\"results\"", "id=\"mapbtn\"",
         "id=\"mapwrap\"", "id=\"allmap\"", "id=\"segment\"", "id=\"filters\"", "id=\"sheetdim\"",
-        "id=\"minecards\"", "id=\"minewrap\"", "id=\"recent\"", "id=\"filtersum\"", "id=\"helpbox\""]
+        "id=\"minecards\"", "id=\"minewrap\"", "id=\"filtersum\"", "id=\"filterarw\"",
+        "id=\"helpbox\""]
 빠진 = [k for k in 필수 if k not in app.PAGE]
 확인("필수 요소", not 빠진, "빠짐: " + ", ".join(빠진) if 빠진 else f"{len(필수)}개 모두 있음")
+
+# 화면에서 뺀 것들 — 다시 들어오면 여기서 잡힌다
+없어야 = ["id=\"recent\"", "recentPush", "toggleHelp", "이렇게 동작해요"]
+남은 = [k for k in 없어야 if k in app.PAGE]
+확인("제거된 요소 없음", not 남은, "남음: " + ", ".join(남은) if 남은 else "최근 검색·동작 안내 토글 제거됨")
+
+# 첫 화면 카드는 매번 섞어 뽑으므로 화면에 '랜덤 추천'임을 밝혀야 한다
+확인("랜덤 추천 표기", "(랜덤 추천)" in app.PAGE, "내 저장 맛집 옆에 표기됨")
 남은자리 = [t for t in ("__SDKPATH__", "__JSKEY__", "__CUISINEOPTS__") if t in app.PAGE]
 확인("치환 안 된 자리표시자 없음", not 남은자리, ", ".join(남은자리) or "없음")
 
