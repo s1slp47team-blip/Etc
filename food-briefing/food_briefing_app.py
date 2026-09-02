@@ -1112,20 +1112,14 @@ def 내맛집홈() -> list[dict]:
     return 카드들
 
 
-def 가게자료수집(동네: str, place: dict) -> dict:
-    """가게 1곳의 카카오맵 상세(메뉴판·사진·별점)와 카카오 블로그 후기를 모은다."""
-    상호 = place["name"]
+def 가게상세수집(place: dict) -> dict:
+    """가게 1곳의 카카오맵 상세(메뉴판·사진·별점·영업시간)만 모은다.
+    블로그·요약 없이 카드를 먼저 채우기 위한 것 — 이쪽만이면 1초 안에 끝난다."""
     상세 = _카카오상세(place["url"])
-    blogs = _카카오블로그(f"{동네} {상호}")
-    posts = [
-        {"title": _태그제거(b.get("title", "")), "text": _태그제거(b.get("contents", ""))[:200]}
-        for b in blogs
-    ]
-    # 사진 우선순위: 카카오맵 상세 사진 → 상세 페이지 og:image → 없음
-    photo = 상세.get("photo") or _카카오사진(place["url"])
     return {
-        "posts": posts,
-        "photo": photo,
+        "posts": [],
+        # 사진 우선순위: 카카오맵 상세 사진 → 상세 페이지 og:image → 없음
+        "photo": 상세.get("photo") or _카카오사진(place["url"]),
         "menus": 상세.get("menus") or [],
         "rating": 상세.get("rating"),
         "rating_count": 상세.get("rating_count"),
@@ -1133,6 +1127,17 @@ def 가게자료수집(동네: str, place: dict) -> dict:
         "open_status": 상세.get("open_status") or "",
         "booking": bool(상세.get("booking")),
     }
+
+
+def 가게자료수집(동네: str, place: dict) -> dict:
+    """상세에 블로그 후기를 더한다 (요약 프롬프트용).
+    상세는 캐시되므로, 기초 단계에서 이미 받았다면 여기서 다시 부르지 않는다."""
+    자료 = 가게상세수집(place)
+    자료["posts"] = [
+        {"title": _태그제거(b.get("title", "")), "text": _태그제거(b.get("contents", ""))[:200]}
+        for b in _카카오블로그(f"{동네} {place['name']}")
+    ]
+    return 자료
 
 
 # ── 3. Gemini: 블로그 내용 → 메뉴/가격대/반응/후기 요약 ─────────
@@ -1314,6 +1319,45 @@ def gemini요약(동네: str, places: list[dict], 자료들: list[dict],
     return 결과
 
 
+def _카드항목(p: dict, 자료: dict, 요약: dict) -> dict:
+    """카드 한 장의 표시 내용. 기초 단계(요약 없음)와 요약 단계가 같은 함수를 쓴다."""
+    메뉴판 = 자료.get("menus") or []
+    # Gemini가 못 채우면 카카오맵 메뉴판에서 직접 계산한다
+    menu = 요약.get("menu")
+    if not menu or menu == "정보 부족":
+        대표 = [m for m in 메뉴판 if m["recommend"]] or 메뉴판
+        menu = ", ".join(m["name"] for m in 대표[:3]) or "정보 부족"
+    price = 요약.get("price")
+    if (not price or price == "정보 부족") and 메뉴판:
+        가격들 = sorted(m["price"] for m in 메뉴판)
+        price = f"메뉴 {가격들[0]:,}~{가격들[-1]:,}원" if len(가격들) > 1 else f"{가격들[0]:,}원"
+    return {
+        "photo": 자료["photo"],
+        "menu": menu,
+        "price": price or "정보 부족",
+        # mood가 비면 배지를 표시하지 않는다 ("후기 없음" 같은 무의미한 배지 제거)
+        "mood": 요약.get("mood") or "",
+        "reviews": (요약.get("reviews") or [])[:2],
+        "rating": 자료.get("rating"),
+        "rating_count": 자료.get("rating_count"),
+        # 검색 단계에서 상세를 건너뛰었으므로 영업시간·예약도 여기서 채운다
+        "hours": 자료.get("hours") or "",
+        "open_status": 자료.get("open_status") or "",
+        "booking": bool(자료.get("booking")),
+        "phone": p.get("phone") or "",
+    }
+
+
+def 기초생성(places: list[dict]) -> list[dict]:
+    """카카오맵 상세만으로 카드를 채운다 — 사진·메뉴·가격·별점·영업시간.
+
+    블로그 후기 요약은 몇 초가 더 걸린다. 한 번에 묶어 내보내면 1초면 준비되는
+    이 내용까지 요약을 기다리게 되므로, 먼저 채울 수 있는 것부터 내보낸다."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as pool:
+        자료들 = list(pool.map(가게상세수집, places))
+    return [_카드항목(p, 자료, {}) for p, 자료 in zip(places, 자료들)]
+
+
 def 브리핑생성(동네: str, places: list[dict]) -> tuple[list[dict], bool]:
     """가게 목록에 사진·메뉴·가격대·반응을 붙여 완성한다.
     반환: (완성 목록, Gemini 요약 성공 여부 — 실패분은 캐시하지 않도록)
@@ -1327,37 +1371,8 @@ def 브리핑생성(동네: str, places: list[dict]) -> tuple[list[dict], bool]:
     # 대부분(80% 이상) 요약됐을 때만 성공으로 보고 캐시한다 — 한도 초과로
     # 통째로/절반쯤 빈 결과가 캐시에 박제되는 것을 막는다
     요약성공 = (not gemini_client) or len(요약) >= len(places) * 0.8
-    enriched = []
-    for i, (p, 자료) in enumerate(zip(places, 자료들)):
-        s = 요약.get(i, {})
-        메뉴판 = 자료.get("menus") or []
-        # Gemini가 못 채우면 카카오맵 메뉴판에서 직접 계산한다
-        menu = s.get("menu")
-        if not menu or menu == "정보 부족":
-            대표 = [m for m in 메뉴판 if m["recommend"]] or 메뉴판
-            menu = ", ".join(m["name"] for m in 대표[:3]) or "정보 부족"
-        price = s.get("price")
-        if (not price or price == "정보 부족") and 메뉴판:
-            가격들 = sorted(m["price"] for m in 메뉴판)
-            price = f"메뉴 {가격들[0]:,}~{가격들[-1]:,}원" if len(가격들) > 1 else f"{가격들[0]:,}원"
-        enriched.append(
-            {
-                "photo": 자료["photo"],
-                "menu": menu,
-                "price": price or "정보 부족",
-                # mood가 비면 배지를 표시하지 않는다 ("후기 없음" 같은 무의미한 배지 제거)
-                "mood": s.get("mood") or "",
-                "reviews": (s.get("reviews") or [])[:2],
-                "rating": 자료.get("rating"),
-                "rating_count": 자료.get("rating_count"),
-                # 검색 단계에서 상세를 건너뛰었으므로 영업시간·예약도 여기서 채운다
-                "hours": 자료.get("hours") or "",
-                "open_status": 자료.get("open_status") or "",
-                "booking": bool(자료.get("booking")),
-                "phone": p.get("phone") or "",
-            }
-        )
-    return enriched, 요약성공
+    return [_카드항목(p, 자료, 요약.get(i, {}))
+            for i, (p, 자료) in enumerate(zip(places, 자료들))], 요약성공
 
 
 # 한 요청에 몇 곳까지 처리할지. 30~100곳을 한 번에 처리하면 응답이 수십 초~몇 분
@@ -1937,48 +1952,60 @@ function doSearch() {
       return;
     }
     // 전부를 한 요청에 처리하면 응답이 길어져 호스팅 프록시가 연결을 끊는다(502).
-    // 서버가 알려주는 next 위치를 따라 구간을 이어서 요청해 요청 하나를 짧게 유지한다.
+    // 구간으로 나눠 요청 하나를 짧게 유지하고, 두 개씩 겹쳐 보낸다.
+    //
+    // 카드 내용은 출처가 둘이다 — 사진·메뉴·가격·별점은 카카오맵에서 1초 안에 오고,
+    // 블로그 반응은 요약에 몇 초가 더 걸린다. 한 번에 묶으면 빠른 쪽까지 느린 쪽을
+    // 기다리므로, 기초를 먼저 받아 채우고 요약을 뒤에 덧입힌다.
     var total = data.places.length;
     var body = {query: q, radius: radius, meal: meal, cuisine: cuisine,
                 cnt: cnt, cert: cert, rate: rate, mine: mine};
-    // 구간을 두 개씩 겹쳐 보낸다. 카카오 상세는 서버에서 호출 간격이 조절되므로
-    // 한 구간이 기다리는 동안 다른 구간의 블로그·요약 작업이 진행돼 전체가 빨라진다.
-    var anyPartial = false, 채운수 = 0, 다음구간 = 0, 진행중 = 0, 끝남 = false;
     var 배치크기 = __BATCH__, 동시구간 = 2;
-    status.textContent = '블로그 후기 분석 중... (0/' + total + ')';
 
-    function 구간보내기(offset) {
-      진행중++;
-      var 몸통 = {}, k;
-      for (k in body) if (body.hasOwnProperty(k)) 몸통[k] = body[k];
-      몸통.offset = offset;
-      ajax('POST', '/enrich', JSON.stringify(몸통), function (err2, detail) {
-        진행중--;
-        if (끝남) return;
-        if (err2) { 끝남 = true; searching = false; status.textContent = '오류: ' + err2.message; return; }
-        if (detail.error) { 끝남 = true; searching = false; status.textContent = detail.error; return; }
-        fillDetail(detail.items, detail.offset);
-        if (detail.partial) anyPartial = true;
-        채운수 += detail.items.length;
-        if (채운수 >= total) {
-          끝남 = true;
-          searching = false;
-          status.textContent = data.center + ' · ' + total + '곳 '
-            + (anyPartial ? '표시 (일부 블로그 요약 생략 — 메뉴판 기준)' : '분석 완료');
-          return;
-        }
-        status.textContent = '블로그 후기 분석 중... (' + 채운수 + '/' + total + ')';
-        구간채우기();
-      });
-    }
+    function 단계돌기(stage, 문구, 다음단계) {
+      var anyPartial = false, 채운수 = 0, 다음구간 = 0, 진행중 = 0, 끝남 = false;
 
-    function 구간채우기() {
-      while (!끝남 && 진행중 < 동시구간 && 다음구간 < total) {
-        구간보내기(다음구간);
-        다음구간 += 배치크기;
+      function 구간보내기(offset) {
+        진행중++;
+        var 몸통 = {}, k;
+        for (k in body) if (body.hasOwnProperty(k)) 몸통[k] = body[k];
+        몸통.offset = offset;
+        몸통.stage = stage;
+        ajax('POST', '/enrich', JSON.stringify(몸통), function (err2, detail) {
+          진행중--;
+          if (끝남) return;
+          if (err2) { 끝남 = true; searching = false; status.textContent = '오류: ' + err2.message; return; }
+          if (detail.error) { 끝남 = true; searching = false; status.textContent = detail.error; return; }
+          fillDetail(detail.items, detail.offset);
+          if (detail.partial) anyPartial = true;
+          채운수 += detail.items.length;
+          if (채운수 >= total) {
+            끝남 = true;
+            if (다음단계) { 다음단계(); return; }   // 기초가 끝나면 이어서 요약 단계
+            searching = false;
+            status.textContent = data.center + ' · ' + total + '곳 '
+              + (anyPartial ? '표시 (일부 블로그 요약 생략 — 메뉴판 기준)' : '분석 완료');
+            return;
+          }
+          status.textContent = 문구 + '... (' + 채운수 + '/' + total + ')';
+          구간채우기();
+        });
       }
+
+      function 구간채우기() {
+        while (!끝남 && 진행중 < 동시구간 && 다음구간 < total) {
+          구간보내기(다음구간);
+          다음구간 += 배치크기;
+        }
+      }
+
+      status.textContent = 문구 + '... (0/' + total + ')';
+      구간채우기();
     }
-    구간채우기();
+
+    단계돌기('base', '메뉴 · 가격 불러오는 중', function () {
+      단계돌기('summary', '블로그 후기 분석 중', null);
+    });
   });
 }
 
@@ -2020,7 +2047,10 @@ function fillDetail(items, offset) {
   items.forEach(function (d, n) {
     var i = (offset || 0) + n;  // 구간 단위로 오므로 카드 번호는 전체 목록 기준으로 환산
     var photo = document.getElementById('photo-' + i);
-    if (photo && d.photo) {
+    // 요약 단계에서 같은 카드를 다시 채운다 → 이미 붙은 사진은 건드리지 않는다
+    // (다시 만들면 같은 사진을 또 내려받고 화면이 한 번 깜빡인다)
+    var 이미지 = photo && photo.getElementsByTagName('img')[0];
+    if (photo && d.photo && !(이미지 && 이미지.src === d.photo)) {
       var img = document.createElement('img');
       img.referrerPolicy = 'no-referrer';
       img.alt = '';
@@ -2040,7 +2070,8 @@ function fillDetail(items, offset) {
     }
     var mood = document.getElementById('mood-' + i);
     if (mood) {
-      if (d.mood) { mood.textContent = d.mood; mood.className = 'badge'; }
+      // 기초 단계에서는 mood가 비어 숨겨진다 → 요약 단계에서 다시 보이게 되돌린다
+      if (d.mood) { mood.textContent = d.mood; mood.className = 'badge'; mood.style.display = ''; }
       else { mood.style.display = 'none'; }  // 후기 없음 등 무의미한 배지는 표시하지 않음
     }
     var rv = document.getElementById('reviews-' + i);
@@ -2280,6 +2311,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if mine not in ("prefer", "only", "off"):
                 mine = "prefer"
             offset = max(0, int(req.get("offset", 0)))
+            # base: 카카오맵 상세만 (빠름) · summary: 블로그 후기 요약까지 (느림)
+            stage = req.get("stage", "summary")
+            if stage not in ("base", "summary"):
+                stage = "summary"
             key = (q, radius, meal, cnt, cert, rate, mine, cuisine)
             with 캐시잠금:
                 base = 검색캐시.get(key)
@@ -2293,6 +2328,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             응답 = {"offset": offset, "total": 총개수, "next": 끝 if 끝 < 총개수 else None}
             if cached is not None:
                 self._send_json({**응답, "items": cached, "partial": False})
+                return
+            if stage == "base":
+                # 기초는 상세 캐시가 있어 금방 끝난다 → 따로 캐시하지 않는다
+                self._send_json({**응답, "items": 기초생성(base["places"][offset:끝]),
+                                 "partial": False})
                 return
             items, 요약성공 = 브리핑생성(q, base["places"][offset:끝])
             if 요약성공:  # Gemini가 통째로 실패한 구간은 캐시하지 않는다 (재검색 시 재시도)
