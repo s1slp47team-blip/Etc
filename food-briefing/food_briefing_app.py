@@ -676,10 +676,21 @@ def 맛집검색(
         seen[d["id"]] = d
         후보.append(d)
 
-    def 수집(질의: str, 배지: str = ""):
+    def 가져오기(질의: str) -> list[dict]:
+        """질의 하나의 검색 결과만 모은다 (판정·누적은 호출부에서 순서대로).
+        병렬로 돌려도 결과 순서가 뒤섞이지 않도록 수집과 담기를 나눠 둔다."""
+        docs: list[dict] = []
         for 코드 in 그룹코드들:
-            for d in _장소수집(질의, x, y, radius, 그룹코드=코드):
-                담기(d, 배지)
+            docs.extend(_장소수집(질의, x, y, radius, 그룹코드=코드))
+        return docs
+
+    # 인증 배지는 결과 목록 자체에는 필요 없다 — 목록 검색이 끝나기를 기다렸다가
+    # 조회하면 첫 카드가 그만큼 늦는다. 목록 검색과 동시에 돌려 둔다.
+    # (cert 필터가 걸린 경로는 인증 자료를 본문에서 이미 쓰므로 중복 조회가 된다 → 제외)
+    인증풀 = 인증작업 = None
+    if 시간대 != "cafe" and cert == "none":
+        인증풀 = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        인증작업 = 인증풀.submit(인증맵, x, y, radius)
 
     if cert == "any":
         # 인증 종류별로 따로 모은 뒤 라운드로빈으로 섞는다 —
@@ -697,23 +708,38 @@ def 맛집검색(
             담기(d, 인증표시명[cert])
     else:
         목표 = 개수 * 2 if 평점4 else 개수  # 평점 필터로 걸러질 몫을 여유 있게 수집
-        for 검색어 in _검색어목록(시간대, 업종):
-            if len(후보) >= 목표:
-                break
-            수집(검색어)
+        검색어들 = list(_검색어목록(시간대, 업종))
+        위치, 묶음크기 = 0, 검색어첫묶음
+        while 위치 < len(검색어들) and len(후보) < 목표:
+            묶음 = 검색어들[위치 : 위치 + 묶음크기]
+            위치 += 묶음크기
+            묶음크기 = 검색어묶음
+            if len(묶음) == 1:
+                for d in 가져오기(묶음[0]):
+                    담기(d)
+                continue
+            # pool.map은 입력 순서대로 돌려주므로 검색어 우선순위가 그대로 유지된다
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(묶음)) as pool:
+                for docs in list(pool.map(가져오기, 묶음)):
+                    for d in docs:
+                        담기(d)
 
     # ── 인증 배지 보강 ────────────────────────────────────────
     # 인증 필터를 안 걸고 검색해도 인증 맛집이면 배지가 보이도록 한다
     # (카페 모드는 인증 검색어가 음식점 위주라 생략)
     if 시간대 != "cafe":
         try:
-            인증정보 = 인증맵(x, y, radius)
+            # 위에서 미리 띄워 둔 조회를 거둔다 (cert 필터 경로는 여기서 조회 — 이미 캐시됨)
+            인증정보 = 인증작업.result() if 인증작업 is not None else 인증맵(x, y, radius)
             for d in 후보:
                 for 배지 in _인증배지찾기(d["place_name"], 인증정보):
                     if 배지 not in d["badges"]:
                         d["badges"].append(배지)
         except Exception as e:
             print(f"인증 배지 조회 실패(무시): {e}")
+        finally:
+            if 인증풀 is not None:
+                인증풀.shutdown(wait=False)
 
     # ── 내 저장 맛집(네이버지도) 반영 ─────────────────────────
     저장목록 = 내맛집목록() if 내저장 in ("prefer", "only") else []
@@ -1339,6 +1365,14 @@ def 브리핑생성(동네: str, places: list[dict]) -> tuple[list[dict], bool]:
 # 구간을 나눠 요청 하나를 짧게 유지하면 이 문제가 구조적으로 사라지고,
 # 진행률 표시와 부분 실패 격리도 함께 얻는다.
 브리핑배치 = 10
+
+# 검색어를 하나씩 순서대로 던지면 질의마다 왕복이 그대로 쌓인다. 업종 필터가
+# 대부분을 걸러내는 조합(예: 반경 안에 그 업종이 드문 동네)에서는 검색어를 끝까지
+# 다 돌아 첫 카드가 크게 늦어진다.
+# 다만 대개는 첫 검색어만으로 목표가 차므로, 처음부터 여러 개를 던지면 평소에
+# 쓰지 않아도 될 호출까지 나간다 → 첫 묶음은 1개로 두고 모자랄 때만 넓힌다.
+검색어첫묶음 = 1
+검색어묶음 = 3
 
 
 # ── 4. 페이지 HTML ──────────────────────────────────────────────
