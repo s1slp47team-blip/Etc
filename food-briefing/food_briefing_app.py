@@ -448,6 +448,14 @@ _내맛집캐시: dict = {"목록": [], "시각": 0.0}
 _내맛집잠금 = threading.Lock()
 내맛집갱신주기 = 3600  # 1초 단위 — 네이버지도에서 새로 저장한 가게가 1시간 내 반영됨
 
+# 공유 링크가 만료되거나 네이버가 내부 API를 막으면 JSON 대신 HTML이 돌아온다.
+# 이때 응답이 곧바로 오지도 않아 링크 하나에 10초 넘게 쓴다. 죽은 링크를 매번
+# 다시 두드리면 갱신 때마다 그만큼을 버리므로, 실패한 링크는 한동안 건너뛴다.
+_링크실패: dict[str, float] = {}
+링크실패대기 = 600
+_예열중 = threading.Event()   # 예열 스레드를 여러 개 띄우지 않기 위한 표시
+_받기잠금 = threading.Lock()  # 같은 목록을 동시에 두 번 내려받지 않게
+
 
 def _공유ID추출(링크: str) -> str:
     """naver.me 단축링크 또는 map.naver.com 공유 URL에서 32자 공유 ID를 얻는다."""
@@ -482,18 +490,28 @@ def _저장링크들() -> list[str]:
     return 링크들
 
 
-def 내맛집목록() -> list[dict]:
-    """저장 리스트 전체를 [{name, lat, lng, folder}] 로 반환 (1시간 캐시)."""
-    with _내맛집잠금:
-        if _내맛집캐시["목록"] and time.time() - _내맛집캐시["시각"] < 내맛집갱신주기:
-            return _내맛집캐시["목록"]
+def _내맛집받기() -> list[dict]:
+    """네이버 공유 리스트를 실제로 내려받아 캐시에 넣는다 (네트워크를 탄다).
+    동시에 들어오면 한 번만 받고, 뒤에 온 쪽은 채워진 캐시를 그대로 쓴다."""
+    with _받기잠금:
+        with _내맛집잠금:
+            목록, 시각 = _내맛집캐시["목록"], _내맛집캐시["시각"]
+        if 목록 and time.time() - 시각 < 내맛집갱신주기:
+            return 목록  # 잠금을 기다리는 사이 다른 쪽이 채웠다
+        return _내맛집내려받기()
+
+
+def _내맛집내려받기() -> list[dict]:
     목록 = []
+    지금 = time.time()
     for 링크 in _저장링크들():
+        if 지금 - _링크실패.get(링크, 0.0) < 링크실패대기:
+            continue  # 최근에 실패한 링크 — 대기 시간이 지나면 다시 시도한다
         fid = _공유ID추출(링크)
         if not fid:
             continue
         try:
-            메타 = requests.get(f"{_저장리스트_API}/{fid}", headers=_저장리스트_헤더, timeout=15)
+            메타 = requests.get(f"{_저장리스트_API}/{fid}", headers=_저장리스트_헤더, timeout=8)
             폴더명 = ((메타.json() or {}).get("folder") or {}).get("name") or "저장"
             시작 = 0
             while True:  # 공유 API는 한 번에 최대 수백 건 — 넉넉히 페이징
@@ -501,7 +519,7 @@ def 내맛집목록() -> list[dict]:
                     f"{_저장리스트_API}/{fid}/bookmarks",
                     params={"start": 시작, "limit": 300},
                     headers=_저장리스트_헤더,
-                    timeout=20,
+                    timeout=12,
                 )
                 항목들 = (resp.json() or {}).get("bookmarkList") or []
                 for b in 항목들:
@@ -518,12 +536,47 @@ def 내맛집목록() -> list[dict]:
                     break
                 시작 += 300
         except (requests.RequestException, ValueError) as e:
-            print(f"내 저장 맛집 로드 실패({링크[:40]}): {e}")
+            _링크실패[링크] = time.time()
+            print(f"내 저장 맛집 로드 실패({링크[:40]}): {e} — {링크실패대기}초간 건너뜁니다")
     with _내맛집잠금:
         _내맛집캐시["목록"], _내맛집캐시["시각"] = 목록, time.time()
     if 목록:
         print(f"내 저장 맛집 {len(목록)}곳 로드")
     return 목록
+
+
+def _내맛집예열() -> None:
+    """캐시를 백그라운드에서 채운다. 이미 채우는 중이면 아무것도 하지 않는다."""
+    if _예열중.is_set():
+        return
+    _예열중.set()
+
+    def 일하기():
+        try:
+            _내맛집받기()
+        except Exception as e:  # 예열이 실패해도 서버는 계속 돈다
+            print(f"내 저장 맛집 예열 실패(무시): {e}")
+        finally:
+            _예열중.clear()
+
+    threading.Thread(target=일하기, daemon=True).start()
+
+
+def 내맛집목록(대기: bool = True) -> list[dict]:
+    """저장 리스트 전체를 [{name, lat, lng, folder}] 로 반환 (1시간 캐시).
+
+    대기=False면 네트워크를 기다리지 않는다 — 지금 캐시에 있는 것만 돌려주고
+    갱신은 백그라운드로 넘긴다. 저장 맛집은 결과를 '거드는' 정보라, 링크가
+    죽어 응답이 늦을 때 검색 전체가 그만큼 멈추는 편이 더 나쁘다.
+    (실제로 죽은 링크 때문에 첫 검색이 29초 붙잡혀 있었다)"""
+    with _내맛집잠금:
+        목록, 시각 = _내맛집캐시["목록"], _내맛집캐시["시각"]
+    if 목록 and time.time() - 시각 < 내맛집갱신주기:
+        return 목록
+    if 대기:
+        return _내맛집받기()
+    _내맛집예열()
+    return 목록  # 아직 없으면 빈 목록 — 다음 검색부터 반영된다
 
 
 def _저장배지(폴더명: str) -> str:
@@ -822,7 +875,8 @@ def 맛집검색(
 
     # ── 내 저장 맛집(네이버지도) 반영 ─────────────────────────
     저장시계 = 잰다().시작()
-    저장목록 = 내맛집목록() if 내저장 in ("prefer", "only") else []
+    # only는 저장 목록이 곧 결과라 기다려야 하지만, prefer는 결과를 거들 뿐이다
+    저장목록 = 내맛집목록(대기=(내저장 == "only")) if 내저장 in ("prefer", "only") else []
     if 저장목록:
         # 반경 안의 저장 맛집이 카카오 검색에 안 잡혔으면 이름으로 직접 찾아 보강한다
         검색됨 = {
@@ -1258,6 +1312,7 @@ GEMINI_CHUNK = 10  # 가게 10곳씩 나눠 병렬 요약 — 호출 횟수(무�
 # 서버는 BrokenPipeError를 본다. 예산을 넘기면 요약을 포기하고 카카오맵 메뉴판
 # 기준 결과라도 돌려준다 — 사진·메뉴·가격은 Gemini 없이도 채워지기 때문이다.
 요약예산초 = 70
+한도재시도대기초 = 5  # 무료 한도에 걸렸을 때 다시 시도하기까지의 대기
 
 
 def _groq요약(prompt: str, 제한초: float = 60) -> list:
@@ -1323,8 +1378,11 @@ def _gemini_chunk요약(동네: str, places: list[dict], 자료들: list[dict], 
                 time.sleep(max(0.0, min(초, 남은시간())))
 
             if "429" in msg or "RESOURCE_EXHAUSTED" in msg:  # 무료 티어 호출 한도
+                # 한도가 소진된 상태에서는 25초를 기다려도 대개 그대로 막힌다.
+                # 그동안 사용자는 빈 카드를 보고 있으므로 짧게 한 번만 다시 본 뒤
+                # 폴백이나 메뉴판 기준 결과로 넘어간다.
                 if 시도 < 최대시도 - 1:
-                    대기(25)
+                    대기(한도재시도대기초)
                 continue
             if "503" in msg or "UNAVAILABLE" in msg:  # 일시적 수요 폭주
                 대기(8 * (시도 + 1))
@@ -2505,6 +2563,9 @@ def main():
         if not no_browser:
             webbrowser.open(url)
         return
+
+    # 저장 맛집을 미리 받아 둔다 — 첫 검색이 이 조회를 기다리지 않도록.
+    _내맛집예열()
 
     print(f"맛집 브리핑 실행 중: {url}")
     print(f"사내망 공유 주소: http://{socket.gethostname()}:{PORT}")
